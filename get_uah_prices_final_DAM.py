@@ -12,7 +12,7 @@ start_date = datetime(2025, 1, 1)
 
 end_date = datetime(2025, 12, 31)
 
-folder_name = "energy_dataset_csv_final"
+folder_name = "energy_dataset_csv_final_DAM"
 
 os.makedirs(folder_name)
 
