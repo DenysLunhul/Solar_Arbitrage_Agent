@@ -1,61 +1,52 @@
+import os
+import xlrd
+import pandas as pd
+from io import BytesIO
+import time
 import requests
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 
-url = "https://www.oree.com.ua/index.php/main/get_uah_prices"
 
-# Параметри у вкладці Network -> Payload щоб сервер прийняв тіпа за свого і видав норм інфу а не хуйню якусь з якою анріл працювати
-payload = {
-    'day': '20.04.2026',
-    'month': '04.2026',
-    'type': 'day'
-}
+#межі скачування
+start_date = datetime(2025, 1, 1)
 
-# Прикинувся браузером мозілла фаєрфокс і тіпа роблю дефолтний запит 
-headers = {
-    'User-Agent': 'Mozilla/5.0',
-    'X-Requested-With': 'XMLHttpRequest',
-    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-}
+end_date = datetime(2025, 12, 31)
 
-#Це по факту сам дефолтний запит 
-response = requests.post(url, data=payload, headers=headers)
+folder_name = "energy_dataset_csv_final"
 
-if response.status_code == 200:
-    soup = BeautifulSoup(response.text, 'html.parser')
-    raw_text = soup.get_text(separator=' --- ', strip=True)
+os.makedirs(folder_name)
+
+current_date = start_date
+
+while current_date <= end_date:
+
+    date_structure = current_date.strftime("%d.%m.%Y")
+
+    file_date_str = current_date.strftime("%Y-%m-%d")
+
+    url = f"https://www.oree.com.ua/index.php/PXS/downloadxlsx/{date_structure}/DAM/2"
+
+    file_name = f"{file_date_str}_DAM.xlsx"
+    file_path = os.path.join(folder_name, file_name)
+
+    try:
+        response = requests.get(url)
+
+        if response.status_code == 200:
+                 df = pd.read_excel(BytesIO(response.content), engine='calamine')
+                 csv_file_name = f"{file_date_str}_DAM.csv"
+                 csv_file_path = os.path.join(folder_name, csv_file_name)
+                 df.to_csv(csv_file_path, index=False)
+                 print(f"Всьо чисто з кайфом неспешка с легкой іроніей скачалось: {csv_file_name}")
+        else:
+            print(f"Якщо язик йде по пізді то це добре, а якшо скрипт то це погано і якраз таки скрипт пішов по пизді")
+    except Exception as e:
+        print(f"Помилка для дати {date_structure}: {e}, ну і всьо пішло по пиздьонці такій немитій небритій вонючій прям фууууу")
     
-    # Розбив текст на список
-    parts = raw_text.split(' --- ')
-    
-    prices = []
-    for item in parts:
-        try:
-            # кастим ціну до флоата
-            price = float(item)
-            prices.append(price)
-        except ValueError:
-            continue
-            
-    print(f"ціни: {prices}")
-else:
-    print(f"Помилка: {response.status_code}")
+    current_date += timedelta(days = 1)
 
-n = len(prices)
-
-#матриця цін
-prices_structured = [[0.0 for i in range(3)] for i in range(n//3)]
-
-k = 0
-
-#заповнення цін по дням
-#Base - 0 index Peak - 1 index Offpeak - 2 index
-for i in range(n//3):
-    for j in range(3):
-        prices_structured[i][j] = prices[k]
-        k += 1
+    time.sleep(2)
 
 
-for row in prices_structured:
-    print(row)
 
 
