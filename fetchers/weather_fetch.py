@@ -3,6 +3,7 @@ import openmeteo_requests
 import pandas as pd
 import requests_cache
 from retry_requests import retry
+from pathlib import Path
 
 # Setup the Open-Meteo API client with cache and retry on error
 cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
@@ -51,5 +52,8 @@ hourly_dataframe["date"] = hourly_dataframe["datetime"].dt.strftime("%Y-%m-%d")
 hourly_dataframe["hour"] = hourly_dataframe["datetime"].dt.strftime("%H:%M")
 hourly_dataframe = hourly_dataframe[["date", "hour", "temperature_2m", "shortwave_radiation"]]
 
+output_path = Path(__file__).resolve().parent.parent / "datasets" / "weather.csv"
+output_path.parent.mkdir(parents = True, exist_ok = True)
+
 print(hourly_dataframe.head(24))
-hourly_dataframe.to_csv("weather.csv", index = False)
+hourly_dataframe.to_csv(output_path, index = False)
