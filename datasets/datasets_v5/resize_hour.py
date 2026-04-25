@@ -29,13 +29,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("/home/denys/PycharmProjects/ds_demo/ds_project_demo/datasets_v4/dataset.csv"),
+        default=Path("/datasets/datasets_v4/dataset.csv"),
         help="Path to input hourly CSV",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/home/denys/PycharmProjects/ds_demo/ds_project_demo/datasets_v5/dataset_15min.csv"),
+        default=Path("/datasets/datasets_v5/dataset_15min.csv"),
         help="Path to output 15-minute CSV",
     )
     parser.add_argument(

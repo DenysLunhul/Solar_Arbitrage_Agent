@@ -52,7 +52,7 @@ hourly_dataframe["date"] = hourly_dataframe["datetime"].dt.strftime("%Y-%m-%d")
 hourly_dataframe["hour"] = hourly_dataframe["datetime"].dt.strftime("%H:%M")
 hourly_dataframe = hourly_dataframe[["date", "hour", "temperature_2m", "shortwave_radiation"]]
 
-output_path = Path(__file__).resolve().parent.parent / "datasets" / "weather.csv"
+output_path = Path(__file__).resolve().parent.parent / "datasets_v0" / "weather.csv"
 output_path.parent.mkdir(parents = True, exist_ok = True)
 
 print(hourly_dataframe.head(24))

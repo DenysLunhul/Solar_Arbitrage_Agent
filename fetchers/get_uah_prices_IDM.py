@@ -9,7 +9,7 @@ from pathlib import Path
 start_date = datetime(2025, 1, 1)
 end_date = datetime(2025, 12, 31)
 
-output_dir = Path(__file__).resolve().parent.parent / "datasets"
+output_dir = Path(__file__).resolve().parent.parent / "datasets_v0"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 current_date = start_date

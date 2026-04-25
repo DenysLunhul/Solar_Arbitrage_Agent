@@ -1,7 +1,7 @@
 import pandas as pd
 
 input_file = "final_full_dataset_IDM.csv" 
-output_file = "../datasets/IDM.csv"
+output_file = "../datasets/datasets_v0/IDM.csv"
 
 df = pd.read_csv(input_file)
 

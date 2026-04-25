@@ -1,7 +1,7 @@
 import pandas as pd
 
 input_file = "FULL_DAM_indexs_and_avg_weighted_prices.csv"
-final_file = "../datasets/Prices.csv"
+final_file = "../datasets/datasets_v0/Prices.csv"
 
 df = pd.read_csv(input_file)
 
