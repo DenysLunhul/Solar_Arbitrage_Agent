@@ -1,8 +1,9 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
-def fetch_grid_graphics(month: int, day: int, year: int = 2026, seed: int = None) -> pd.DataFrame:
+
+def fetch_grid_graphics(today: date, seed: int = None) -> pd.DataFrame:
     TARGET_HOURS_PER_DAY = {
         1: 3.50, 2: 3.00, 3: 1.50, 4: 0.50, 5: 0.20, 6: 0.10,
         7: 0.21, 8: 0.25, 9: 0.40, 10: 2.07, 11: 3.12, 12: 6.68,
@@ -15,15 +16,16 @@ def fetch_grid_graphics(month: int, day: int, year: int = 2026, seed: int = None
     TIMESTEPS_PER_DAY = 96 
     MAX_HOURS_UNTIL_OUTAGE = 24.0
 
-    input_dt = datetime(year, month, day)
+    input_dt = today
     target_dt = input_dt + timedelta(days=1)
-    
+
     t_month = target_dt.month
     t_day = target_dt.day
-    t_dow = target_dt.isoweekday() 
+    t_dow = target_dt.isoweekday()
 
     if seed is not None:
         np.random.seed(seed)
+
 
     target_h = TARGET_HOURS_PER_DAY.get(t_month, 0.0)
     target_timesteps = int(round(target_h * 4))
@@ -85,19 +87,9 @@ def fetch_grid_graphics(month: int, day: int, year: int = 2026, seed: int = None
                 if is_nearest: next_outage_duration[t] = dur
 
     df_result = pd.DataFrame({
-        'month':                [t_month] * TIMESTEPS_PER_DAY,
-        'day':                  [t_day] * TIMESTEPS_PER_DAY,
-        'day_of_week':          [t_dow] * TIMESTEPS_PER_DAY,
-        'hour':                 [i // 4 for i in range(TIMESTEPS_PER_DAY)],
-        'minute':               [(i % 4) * 15 for i in range(TIMESTEPS_PER_DAY)],
         'Grid':                 grid,
         'next_outage_duration': np.round(next_outage_duration, 2),
         'outage_remaining_h':   np.round(outage_remaining_h, 2),
         'hours_until_outage':   np.round(hours_until_outage, 2),
     })
-
-    df_result.to_csv(f"grid_graphic_{month}_{day}.csv", index= False)
-
     return df_result
-
-fetch_grid_graphics(12, 1, 2026, None)

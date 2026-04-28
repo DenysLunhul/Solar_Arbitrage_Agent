@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
-from datetime import timedelta
+from datetime import timedelta, date
 
-def fetch_time(today):
+def fetch_time(today: date) -> pd.DataFrame:
     tomorrow = today + timedelta(days=1)
     hours = range(0, 24)
     minutes = [0, 15, 30, 45]

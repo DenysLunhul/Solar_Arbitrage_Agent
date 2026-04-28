@@ -3,11 +3,10 @@ import time
 import pandas as pd
 from io import BytesIO
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 
-
-def fetch_DAM(today):
+def fetch_DAM(today: date) -> pd.DataFrame:
     # IDM_RENAME = {
     #     "Година": "Hour",
     #     "Ціна, грн/МВт.год": "IDM_Price",
@@ -24,8 +23,7 @@ def fetch_DAM(today):
     }
 
 
-    start_date = datetime(2025, 1, 1)
-    current_date = start_date
+    current_date = today + timedelta(days=1)
     date_structure = current_date.strftime("%d.%m.%Y")
     file_date_str = current_date.strftime("%Y-%m-%d")
     # url = f"https://www.oree.com.ua/index.php/PXS/downloadxlsx/{date_structure}/IDM/2"

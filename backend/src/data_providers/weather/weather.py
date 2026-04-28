@@ -1,10 +1,12 @@
+from datetime import date, timedelta
+
 import openmeteo_requests
 import pandas as pd
 import requests_cache
 from retry_requests import retry
 
 
-def fetch_weather():
+def fetch_weather(today: date) -> pd.DataFrame:
 	# Setup the Open-Meteo API client with cache and retry on error
 	cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
 	retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
@@ -12,6 +14,8 @@ def fetch_weather():
 
 	# Make sure all required weather variables are listed here
 	# The order of variables in hourly or daily is important to assign them correctly below
+	tomorrow = today + timedelta(days=1)
+	target_date = tomorrow.strftime("%Y-%m-%d")
 	url = "https://api.open-meteo.com/v1/forecast"
 	params = {
 		"latitude": 48.2904,
@@ -19,8 +23,8 @@ def fetch_weather():
 		"hourly": ["temperature_2m", "shortwave_radiation", "global_tilted_irradiance_instant"],
 		"timezone": "auto",
 		"tilt": 35,
-		"start_date": "2026-04-29",
-		"end_date": "2026-04-29",
+		"start_date": target_date,
+		"end_date": target_date,
 	}
 	responses = openmeteo.weather_api(url, params = params)
 
