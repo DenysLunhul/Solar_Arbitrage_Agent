@@ -1,11 +1,9 @@
 import pandas as pd
 import numpy as np
-from datetime import date, timedelta
+from datetime import timedelta
 
-
-def get_tomorrow_time_features(today):
+def fetch_time(today):
     tomorrow = today + timedelta(days=1)
-
     hours = range(0, 24)
     minutes = [0, 15, 30, 45]
     rows = [
@@ -13,9 +11,7 @@ def get_tomorrow_time_features(today):
         for h in hours
         for m in minutes
     ]
-
     df = pd.DataFrame(rows)
-
     df["Hour_sin"] = np.sin(2 * np.pi * df["Hour"] / 24)
     df["Hour_cos"] = np.cos(2 * np.pi * df["Hour"] / 24)
     df["Minute_sin"] = np.sin(2 * np.pi * df["Minute"] / 60)
@@ -23,10 +19,4 @@ def get_tomorrow_time_features(today):
     df["Day_of_week"] = tomorrow.isoweekday()
     df["Day_of_week_sin"] = np.sin(2 * np.pi * df["Day_of_week"] / 7)
     df["Day_of_week_cos"] = np.cos(2 * np.pi * df["Day_of_week"] / 7)
-
     return df
-
-if __name__ == "__main__":
-    today = date.today()
-    df = get_tomorrow_time_features(today)
-    df.to_csv("schedule.csv", index=False)
