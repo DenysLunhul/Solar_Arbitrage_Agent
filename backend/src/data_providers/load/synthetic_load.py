@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import date, timedelta
 
 
-def get_tomorrow_load(today: date) -> pd.DataFrame:
+def fetch_load(today: date) -> pd.DataFrame:
     tomorrow = today + timedelta(days=1)
     day_of_week = tomorrow.isoweekday()
 

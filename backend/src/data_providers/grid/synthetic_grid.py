@@ -3,7 +3,7 @@ import numpy as np
 from datetime import datetime, timedelta, date
 
 
-def fetch_grid_graphics(today: date, seed: int = None) -> pd.DataFrame:
+def fetch_grid(today: date, seed: int = None) -> pd.DataFrame:
     TARGET_HOURS_PER_DAY = {
         1: 3.50, 2: 3.00, 3: 1.50, 4: 0.50, 5: 0.20, 6: 0.10,
         7: 0.21, 8: 0.25, 9: 0.40, 10: 2.07, 11: 3.12, 12: 6.68,
