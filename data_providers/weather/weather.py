@@ -5,7 +5,7 @@ import requests_cache
 from retry_requests import retry
 
 
-def fetch_weather(today: date) -> pd.DataFrame:
+def fetch_weather(today: date, tilt: float = 35, azimuth: float = 0) -> pd.DataFrame:
 	# Setup the Open-Meteo API client with cache and retry on error
 	cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
 	retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
@@ -21,7 +21,8 @@ def fetch_weather(today: date) -> pd.DataFrame:
 		"longitude": 25.9324,
 		"hourly": ["temperature_2m", "shortwave_radiation", "global_tilted_irradiance_instant"],
 		"timezone": "auto",
-		"tilt": 35,
+		"tilt": tilt,
+		"azimuth": azimuth,
 		"start_date": target_date,
 		"end_date": target_date,
 	}

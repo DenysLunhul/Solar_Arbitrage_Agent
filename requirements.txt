@@ -1,0 +1,10 @@
+fastapi
+pandas
+numpy
+requests
+openmeteo-requests
+requests-cache
+retry-requests
+gymnasium
+python-calamine
+sqlalchemy
