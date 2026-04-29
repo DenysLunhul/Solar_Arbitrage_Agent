@@ -35,10 +35,20 @@ def combine(tilt = None, azimuth = None):
     DAM = fetch_DAM(today)
     weather = fetch_weather(today, tilt, azimuth)
     dataset = pd.concat([time, grid, load, weather, DAM], axis=1)
+
+    current_year = datetime.now().year
+    dataset['timestamp'] = dataset.apply(
+        lambda r: datetime(current_year, int(r['Month']), int(r['Day']), int(r['Hour']), int(r['Minute'])),
+        axis=1
+    )
+    cols = dataset.columns.tolist()
+    cols = [cols[-1]] + cols[:-1]
+    dataset = dataset[cols]
     return dataset
 
 
 if __name__ == "__main__":
-    t, a = get_solar_parameters()
+    # t, a = get_solar_parameters()
+    t, a = 35, 0
     df = combine(t, a)
     df.to_csv("combined.csv", index=False)
