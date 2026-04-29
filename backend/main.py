@@ -1,4 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
+from backend.models import site
+from backend.core.database import engine, Base
+
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 

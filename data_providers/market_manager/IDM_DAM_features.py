@@ -31,7 +31,7 @@ def fetch_DAM(today: date) -> pd.DataFrame:
     #
     # IDM_drop_columns = ["Мінімальна ціна, грн/МВт.год","Максимальна ціна, грн/МВт.год",
     #                     "Заявлений обсяг продажу, МВт.год","Заявлений обсяг купівлі, МВт.год"]
-    DAM_drop_columns = ["Заявлений обсяг продажу, МВт.год","Заявлений обсяг купівлі, МВт.год"]
+    DAM_drop_columns = ["Заявлений обсяг продажу, МВт.год","Заявлений обсяг купівлі, МВт.год", "Година"]
 
     # # try:
     # #     response = requests.get(url, timeout=30)
@@ -54,6 +54,7 @@ def fetch_DAM(today: date) -> pd.DataFrame:
         if response.status_code == 200:
             df = pd.read_excel(BytesIO(response.content), engine="calamine", header=0)
             df = df.drop(columns=DAM_drop_columns)
+            df = df.loc[df.index.repeat(4)].reset_index(drop=True)
             df.rename(columns=DAM_RENAME)
             return df
     except Exception:
