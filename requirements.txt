@@ -8,3 +8,7 @@ retry-requests
 gymnasium
 python-calamine
 sqlalchemy
+pyjwt
+python-dotenv
+pwdlib
+pydantic

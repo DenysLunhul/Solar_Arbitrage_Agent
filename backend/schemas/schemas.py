@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class Battery(BaseModel):
@@ -25,3 +25,15 @@ class SiteConfig(BaseModel):
     battery: Battery
     inverter: Inverter
     solar: SolarPanel
+
+
+class BaseUser(BaseModel):
+    username: str
+    email: str
+
+class UserCreate(BaseUser):
+    password: str
+
+class UserResponse(BaseUser):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
