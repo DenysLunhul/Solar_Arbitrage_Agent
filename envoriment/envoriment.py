@@ -66,7 +66,7 @@ class Envoriment(gym.Env):
         #Блок обрахунку змін для батареї
         battery_power_delta = action[0] * self.max_batt_power / 4 
 
-        if battery_power_delta > 0:
+        if(battery_power_delta > 0):
             #Скільки енергії треба ззвоні(без врахування ККД)
             energy_needed_from_outside = battery_power_delta
             #Скільки взагалі максимально ми можемо втиснути в батарею
@@ -80,7 +80,7 @@ class Envoriment(gym.Env):
             #РЕАЛЬНИЙ заряд батареї після заряджання
             self.soc = self.soc + max_can_charge / self.max_batt_capacity
 
-        elif battery_power_delta < 0:
+        elif(battery_power_delta < 0):
             #Скільки треба віддати(без ККД)
             energy_to_give = battery_power_delta
             #Рахує чи ми взагалі можемо стільки віддати скільки треба
@@ -98,3 +98,10 @@ class Envoriment(gym.Env):
 
         #Блок обрахунку змін для мережі
         grid_delta = action[1] * self.max_grid_capacity / 4
+
+
+
+
+
+
+
