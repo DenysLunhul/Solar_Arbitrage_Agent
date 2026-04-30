@@ -10,7 +10,7 @@ router = APIRouter(prefix="/config", tags=["config"])
 
 @router.post("/")
 def save_config(config_name: str, settings: SiteConfig, db: Session = Depends(get_db), user = Depends(get_current_user)) -> SystemConfig:
-    config_in_db = SystemConfig(config_name=config_name, settings=settings.model_dump())
+    config_in_db = SystemConfig(config_name=config_name, settings=settings.model_dump(), user_id=user.id)
     db.add(config_in_db)
     db.commit()
     db.refresh(config_in_db)
