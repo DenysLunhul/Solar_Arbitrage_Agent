@@ -1,4 +1,4 @@
-from sqlalchemy import PrimaryKeyConstraint, Column, Integer, DateTime, String
+from sqlalchemy import PrimaryKeyConstraint, Column, Integer, DateTime, String, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 
 from backend.core.database import Base
@@ -15,6 +15,7 @@ class History(Base):
 class SystemConfig(Base):
     __tablename__ = "system_configs"
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
     config_name = Column(String)
     settings = Column(JSONB)
 
