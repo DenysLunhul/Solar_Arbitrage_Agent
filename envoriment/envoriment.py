@@ -194,11 +194,13 @@ class Envoriment(gym.Env):
 
         
 
+        #Блок обрахунку змін для мережі
+        grid_delta = action[1] * self.max_grid_capacity / 4
         
 
 
 
 
 
-    
-    
+
+
