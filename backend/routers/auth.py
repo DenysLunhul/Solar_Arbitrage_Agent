@@ -6,7 +6,7 @@ from backend.core.database import get_db
 from backend.models.site import User
 from backend.schemas import schemas
 from backend.security.security import verify_password, create_access_token, Token, get_password_hash
-
+from backend.core.database import save_to_db
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -26,10 +26,10 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 def register(register_data: schemas.UserCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == register_data.username).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+    if db.query(User).filter(User.email == register_data.email).first() is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already exists")
 
     hashed_password = get_password_hash(register_data.password)
     user_in_db = User(username=register_data.username, email=register_data.email, hashed_password=hashed_password)
-    db.add(user_in_db)
-    db.commit()
-    db.refresh(user_in_db)
+    save_to_db(db, user_in_db)
     return user_in_db

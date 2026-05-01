@@ -26,6 +26,13 @@ class SiteConfig(BaseModel):
     inverter: Inverter
     solar: SolarPanel
 
+class SystemConfigResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    user_id: int
+    config_name: str
+    settings: dict
+
 
 class BaseUser(BaseModel):
     username: str

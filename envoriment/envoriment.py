@@ -4,10 +4,7 @@ import numpy as np
 import pandas as pd
 
 
-
-
-
-class Envoriment(gym.Env):
+class Environment(gym.Env):
 
     def __init__(self, df):
 
@@ -189,10 +186,10 @@ class Envoriment(gym.Env):
 
 
 
-        
 
 
-        
+
+
 
         #Блок обрахунку змін для мережі
         grid_delta = action[1] * self.max_grid_capacity / 4
