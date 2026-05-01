@@ -19,4 +19,6 @@ def fetch_time(today: date) -> pd.DataFrame:
     df["Day_of_week"] = tomorrow.isoweekday()
     df["Day_of_week_sin"] = np.sin(2 * np.pi * df["Day_of_week"] / 7)
     df["Day_of_week_cos"] = np.cos(2 * np.pi * df["Day_of_week"] / 7)
+    df["Day_sin"] = np.sin(2 * np.pi * df["Day"] / 31)
+    df["Day_cos"] = np.cos(2 * np.pi * df["Day"] / 31)
     return df
