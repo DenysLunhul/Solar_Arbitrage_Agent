@@ -11,4 +11,4 @@ app.include_router(auth.router)
 
 @app.get("/")
 def home_page():
-    return {"message": "Hello World!"}
+    return {"message": "Welcome page!"}
