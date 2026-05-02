@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import gymnasium as gym
 import numpy as np
 import pandas as pd
 from gymnasium import spaces
+from pydantic import BaseModel, Field
 
 
-@dataclass
-class EnvConfig:
+class EnvConfig(BaseModel):
     """
     All hardware parameters for the RL environment.
 
@@ -18,22 +16,22 @@ class EnvConfig:
     """
 
     # Battery
-    max_batt_capacity: float  = 2.0    # кВт·год — загальна ємність
-    max_batt_power: float     = 1.0    # кВт     — макс. потужність заряду/розряду
-    batt_efficiency: float    = 0.95   # ККД (однонаправлений)
-    lcos: float               = 1.5    # UAH/кВт·год — вартість деградації
-    min_soc_reserve: float    = 0.20   # частка (0–1) — мінімальний SoC при відключенні
+    max_batt_capacity: float = Field(default=2.0,  gt=0)
+    max_batt_power: float    = Field(default=1.0,  gt=0)
+    batt_efficiency: float   = Field(default=0.95, gt=0, le=1)
+    lcos: float              = Field(default=1.5,  ge=0)
+    min_soc_reserve: float   = Field(default=0.20, ge=0, le=1)
 
     # Inverter
-    inverter_max_power: float   = 3.0  # кВт — макс. потужність інвертора (ліміт експорту)
-    inverter_efficiency: float  = 0.97 # ККД інвертора мережі
+    inverter_max_power: float  = Field(default=3.0,  gt=0)
+    inverter_efficiency: float = Field(default=0.97, gt=0, le=1)
 
     # Solar
-    solar_peak_power_kw: float = 3.0   # кВт — номінальна потужність при GTI=1000 Вт/м²
-    solar_efficiency: float    = 0.18  # ККД панелей
+    solar_peak_power_kw: float = Field(default=3.0,  gt=0)
+    solar_efficiency: float    = Field(default=0.18, gt=0, le=1)
 
     # Grid
-    max_grid_capacity: float   = 5.0   # кВт — фізичний ліміт вводу/виводу
+    max_grid_capacity: float = Field(default=5.0, gt=0)
 
     @classmethod
     def from_site_config(cls, config) -> EnvConfig:
