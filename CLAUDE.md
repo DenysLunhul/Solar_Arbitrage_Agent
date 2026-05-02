@@ -18,7 +18,7 @@ ds_project_demo/
 ├── requirements.txt
 ├── .env                                   # DATABASE_URL, SECRET_KEY, ALGORITHM, ACCESS_EXPIRE_MINUTES
 ├── envoriment/
-│   └── envoriment.py                      # Gymnasium RL environment (partially complete — see Known Issues)
+│   └── envoriment.py                      # Gymnasium RL environment (fully implemented)
 ├── data_providers/
 │   ├── __init__.py
 │   ├── orchestrator/
@@ -27,13 +27,12 @@ ds_project_demo/
 │   │   ├── combined.csv                   # Last generated live dataset (96 rows × 25 cols)
 │   │   └── .cache.sqlite                  # Open-Meteo API cache
 │   ├── agent_data_preprocessing/
-│   │   ├── __init__.py
-│   │   └── preprocessing.py              # Feature dropping + normalization (INCOMPLETE — see Known Issues)
+│   │   └── __init__.py                    # preprocessing.py does NOT exist — no preprocessing in pipeline
 │   └── components/
 │       ├── __init__.py
 │       ├── market_manager/
 │       │   ├── __init__.py
-│       │   └── IDM_DAM_features.py        # Fetches DAM prices from OREE (oree.com.ua); IDM missing
+│       │   └── IDM_DAM_features.py        # Fetches DAM prices from OREE (oree.com.ua); IDM not implemented
 │       ├── weather/
 │       │   ├── __init__.py
 │       │   └── weather.py                 # Open-Meteo forecast (GTI, temp, radiation)
@@ -49,12 +48,18 @@ ds_project_demo/
 ├── datasets/
 │   ├── datasets_v0/ … datasets_v8/        # Historical versions (kept for reference)
 │   ├── datasets_v9/
-│   │   ├── dataset.csv                    # Final training dataset: 35 041 rows × 27 cols (~1 year)
+│   │   ├── dataset.csv                    # 35 041 rows × 27 cols (legacy — IDM columns, outage_risk; not aligned with live pipeline)
 │   │   ├── sorted.csv                     # Sorted version of dataset.csv
-│   │   ├── build_v10.py                   # Build script for v10 (not yet executed)
+│   │   ├── build_v10.py                   # Build script used to produce v10
 │   │   ├── checkkkk.py                    # Validation script
 │   │   └── sort_dataset.py                # Sorting utility
-│   └── datasets_v10/                      # Empty — v10 not built yet
+│   └── dataset_v10/                       # CURRENT training dataset
+│       ├── dataset_final.csv              # 35 041 rows × 25 cols — column-aligned with live pipeline ✅
+│       ├── dataset.csv                    # Intermediate (has Day_sin/Day_cos, still has IDM cols)
+│       ├── dataset_no_idm.csv             # Intermediate (IDM cols dropped)
+│       ├── build_v10.py                   # Step 1: adds Day_sin/Day_cos to v9 sorted
+│       ├── drop_idm.py                    # Step 2: drops IDM_* and Avg_Weighted_Price
+│       └── drop_dam_vol.py                # Step 3: reorders columns, adds timestamp → dataset_final.csv
 ├── backend/
 │   ├── __init__.py
 │   ├── main.py                            # FastAPI app entry point
@@ -62,12 +67,13 @@ ds_project_demo/
 │   │   ├── database.py                    # SQLAlchemy engine + session (PostgreSQL)
 │   │   └── loader.py                      # Bulk-uploads DataFrame → History table
 │   ├── models/
-│   │   └── site.py                        # ORM: User, SystemConfig, History
+│   │   └── site.py                        # ORM: User, SystemConfig, History, AgentPredictions
 │   ├── routers/
 │   │   ├── auth.py                        # POST /auth/login, POST /auth/register
-│   │   └── config.py                      # POST /config/, GET /config/, GET /config/list
+│   │   ├── config.py                      # POST /config/, GET /config/, GET /config/list
+│   │   └── predictions.py                 # EMPTY — placeholder for inference endpoints
 │   ├── schemas/
-│   │   └── schemas.py                     # Pydantic: SiteConfig, Battery, Inverter, SolarPanel, User
+│   │   └── schemas.py                     # Pydantic: SiteConfig, Battery, Inverter, SolarPanel, Grid, User
 │   └── security/
 │       └── security.py                    # JWT (HS256), pwdlib Argon2 password hashing
 └── temp/                                  # One-off data-cleaning utility scripts (not part of main pipeline)
@@ -106,8 +112,10 @@ Hourly rows are expanded ×4 to match 15-min timesteps.
 ### Spaces
 
 ```python
-action_space      = Box(low=-1.0, high=1.0, shape=(2,))    # [battery_action, grid_action]
-observation_space = Box(low=-inf, high=inf, shape=(31,))    # declared; actual shape ~26 — see Known Issues
+action_space      = Box(low=-1.0, high=1.0, shape=(2,), dtype=float32)
+observation_space = Box(low=-inf, high=inf, shape=(n_features + 1,), dtype=float32)
+  # n_features = df.shape[1] computed at runtime from input DataFrame
+  # With dataset_final.csv (24 feature cols after dropping timestamp) → shape=(25,)
 ```
 
 | Action dim | Meaning |
@@ -115,32 +123,41 @@ observation_space = Box(low=-inf, high=inf, shape=(31,))    # declared; actual s
 | `action[0]` | Battery: +1 = full charge, −1 = full discharge (scaled by `max_batt_power / 4`) |
 | `action[1]` | Grid exchange: +1 = full import, −1 = full export (scaled by `max_grid_capacity / 4`) |
 
-### Default Hardware Parameters (hardcoded — not yet loaded from `SystemConfig`)
+### Hardcoded Hardware Parameters (not yet loaded from `SystemConfig`)
 
 | Parameter | Value |
 |---|---|
 | `max_batt_capacity` | 2.0 kWh |
 | `max_batt_power` | 1.0 kW |
 | `max_grid_capacity` | 5.0 kW |
+| `batt_efficiency` | 0.95 |
+| `lcos` | 1.5 UAH/kWh |
+| `soc_soft_min / soc_soft_max` | 0.20 / 0.80 |
+| `solar_peak_power` | 3.0 kW |
+| `solar_efficiency` | 0.18 |
 | Initial SoC | 0.5 |
-| Charge efficiency | 0.95 (round-trip implied) |
 
 ### Observation Vector
-`np.append(df.iloc[step], soc)` → dataset row + SoC scalar.  
-Declared shape `(31,)` does not match the combined CSV output of 25 columns (→ actual `(26,)`). Must be reconciled before training.
 
-### Reward Function (implemented, simplified)
+`np.append(df.iloc[step], soc)` — dataset row (24 feature columns, `timestamp` dropped) + SoC scalar → shape `(25,)`.
+
+### Reward Function (fully implemented)
+
 ```
-reward = -(actual_grid_energy_ts * curr_price) - unmet_load_penalty - mismatch_penalty
+reward = -(actual_grid_kwh × curr_price)      # market P&L
+       - lcos × |actual_batt_energy|           # LCOS degradation cost
+       - 50 × unmet_load                       # unmet load penalty [kWh]
+       - 2  × mismatch                         # power balance deviation
+       - quadratic SoC soft penalty            # outside [soc_soft_min, soc_soft_max]
+       - 30 × soc_deficit × log(outage_remaining_h)   # outage reserve (when Grid==0)
+       + 5  × urgency × soc_ready              # pre-outage charging bonus (when Grid==1, time_to_outage ≤ 3h)
 ```
-- `unmet_load_penalty` = 50 × unmet energy [kWh]
-- `mismatch_penalty` = penalty for power balance deviation
-- **Missing**: LCOS degradation cost and outage reserve penalty (see Known Issues)
 
 ### Episode
 - 96 steps per episode (one full day)
 - `terminated = True` at step 96; `truncated = False`
-- `reset()` returns `(observation, info)` per Gymnasium API ✅
+- `reset()` returns `(observation, info)` per Gymnasium v26+ API
+- `step()` returns `(observation, reward, terminated, truncated, info)` with 10+ metrics in `info`
 
 ---
 
@@ -163,10 +180,8 @@ Day_of_week, Day_of_week_sin, Day_of_week_cos, Day_sin, Day_cos,
 Grid, next_outage_duration, outage_remaining_h, hours_until_outage,
 Load,
 Temperature_2m, Shortwave_radiation, Global_tilted_irradiance_instant,
-DAM_Price, DAM_Vol_Sale, DAM_Vol_Buy
+DAM_Price, DAM_Vol_Buy, DAM_Vol_Sale
 ```
-
-DAM columns are renamed to English inside `IDM_DAM_features.py` before being merged. `Day_sin` / `Day_cos` are new columns added in the latest version of `time_features.py` (not present in training dataset v9).
 
 ### `synthetic_grid.py` — Outage Schedule
 
@@ -204,45 +219,48 @@ Hour_sin, Hour_cos, Minute_sin, Minute_cos,
 Day_of_week, Day_of_week_sin, Day_of_week_cos,
 Day_sin, Day_cos
 ```
-`Day_sin` / `Day_cos` are new (not in training dataset v9 — column mismatch with live pipeline).
-
-### `preprocessing.py` — Feature Preprocessing (INCOMPLETE)
-
-Located at `data_providers/agent_data_preprocessing/preprocessing.py`.
-
-- `drop_features()` — defined but has a **syntax bug**: passes `[DROP_FEATURES]` (list-in-list) to `.drop(columns=...)`. Should be `.drop(columns=DROP_FEATURES)`.
-- `normalize_features()` — stub only; not implemented.
-- Not called from anywhere in the current pipeline.
 
 ---
 
-## Training Dataset (`datasets/datasets_v9/dataset.csv`)
+## Training Dataset (`datasets/dataset_v10/dataset_final.csv`) ✅ CURRENT
 
 - **Size**: 35 041 rows (~365 days × 96 steps)
 - **Period**: Full year, 15-min resolution
+- **Column-aligned** with live `data_combiner.py` output
 
-### Columns (27 total)
+### Columns (25 total)
 
 | Column | Description |
 |---|---|
-| Date | "M - D" string (dropped before training) |
-| Month, Day, Day_of_week, Hour, Minute | Calendar features |
-| DAM_Price | UAH/MWh day-ahead price |
-| DAM_Vol_Sale, DAM_Vol_Buy | MWh volumes |
-| IDM_Price, IDM_Last_Price, IDM_Vol_Sale, IDM_Vol_Buy | Intraday market |
-| Avg_Weighted_Price | Weighted average of DAM+IDM |
-| Load | Synthetic load (W) |
-| global_tilted_irradiance_instant | W/m² on tilted panel |
-| Temperature_2m | °C |
-| Shortwave_Radiation | W/m² global |
+| timestamp | ISO datetime string |
+| Month, Day, Hour, Minute | Calendar features |
+| Day_of_week | 0–6 |
 | Hour_sin, Hour_cos | Cyclical hour (period 24) |
 | Minute_sin, Minute_cos | Cyclical minute (period 60) |
 | Day_of_week_sin, Day_of_week_cos | Cyclical weekday (period 7) |
+| Day_sin, Day_cos | Cyclical day-of-month (period 31) |
 | Grid | 1=grid on, 0=outage |
+| next_outage_duration | Hours until end of next outage block |
 | outage_remaining_h | Hours left in current outage |
-| outage_risk | Probability/fraction of outage in coming horizon |
+| hours_until_outage | Hours until next outage starts |
+| Load | Synthetic load (W) |
+| Temperature_2m | °C |
+| Shortwave_radiation | W/m² global |
+| Global_tilted_irradiance_instant | W/m² on tilted panel |
+| DAM_Price | UAH/MWh day-ahead price |
+| DAM_Vol_Buy, DAM_Vol_Sale | MWh volumes |
 
-**Note**: v9 does not have `Day_sin` / `Day_cos` (added to live pipeline later). Also lacks `hours_until_outage` and `next_outage_duration` from the live pipeline. The live combined CSV and the training dataset are not yet column-aligned.
+### Dataset Build Chain (v9 → v10)
+
+```
+datasets_v9/sorted.csv
+  → dataset_v10/build_v10.py     # adds Day_sin / Day_cos
+  → dataset_v10/dataset.csv
+  → dataset_v10/drop_idm.py      # removes IDM_*, Avg_Weighted_Price, outage_risk
+  → dataset_v10/dataset_no_idm.csv
+  → dataset_v10/drop_dam_vol.py  # reorders cols, renames, adds timestamp
+  → dataset_v10/dataset_final.csv  ✅  FINAL
+```
 
 ### Dataset Version History
 
@@ -256,8 +274,8 @@ Located at `data_providers/agent_data_preprocessing/preprocessing.py`.
 | v6 | Added GTI (Global Tilted Irradiance), temperature correction |
 | v7 | Validation checks |
 | v8 | Added sin/cos for day-of-month and month |
-| v9 | **Current**: fixed Hour=24→Hour=0 next-day bug; shifted GTI +1h alignment; recalculated all cyclical features |
-| v10 | Planned — build script exists at `datasets_v9/build_v10.py`; not yet executed |
+| v9 | Fixed Hour=24→Hour=0 next-day bug; shifted GTI +1h alignment; recalculated all cyclical features (27 cols, has IDM) |
+| **v10** | **Current**: dropped IDM, added `Day_sin`/`Day_cos`, `hours_until_outage`, `next_outage_duration`; column-aligned with live pipeline (25 cols) |
 
 ---
 
@@ -281,23 +299,27 @@ Located at `data_providers/agent_data_preprocessing/preprocessing.py`.
 ### SiteConfig Schema
 
 ```python
-SiteConfig:
-  battery:
-    capacity_kwh: float          # BESS total capacity [kWh]
-    min_reserve: float = 10      # Minimum SoC % during outages
-    lcos: float                  # Levelized cost [UAH/kWh] — degradation cost
-    max_charge_power: float      # [kW]
-    max_discharge_power: float   # [kW]
-    efficiency: float = 1        # Round-trip efficiency (override)
-  inverter:
-    max_power: float             # [kW]
-    efficiency: float
-    is_grid_tied: bool
-  solar:
-    peak_power: float            # [kWp]
-    efficiency: float
-    azimuth: float = 0           # 0 = South
-    tilt: float = 35             # Degrees from horizontal
+Battery:
+  battery_capacity_kwh: float
+  battery_min_reserve: float          # Minimum SoC % during outages
+  battery_lcos: float                 # Levelized cost [UAH/kWh]
+  battery_max_charge_power: float     # [kW]
+  battery_max_discharge_power: float  # [kW]
+  battery_efficiency: float
+
+Inverter:
+  max_power: float                    # [kW]
+  efficiency: float
+
+SolarPanel:
+  solar_peak_power: float             # [kWp]
+  solar_efficiency: float
+  solar_azimuth: float = 0            # 0 = South
+  solar_tilt: float = 35              # Degrees from horizontal
+
+Grid:
+  grid_capacity: float                # [kW]
+  price_buy_from_grid: float          # [UAH/kWh]
 ```
 
 ### Database Models
@@ -306,7 +328,8 @@ SiteConfig:
 |---|---|
 | `users` | id, username, email, hashed_password |
 | `system_configs` | id, user_id (FK), config_name, settings (JSONB) |
-| `history` | id, timestamp, data (JSONB) — stores per-timestep telemetry |
+| `history` | id, user_id (FK), timestamp, data (JSONB) — per-timestep telemetry |
+| `agent_predictions` | id, user_id (FK), timestamp, data (JSONB) — **defined, no endpoints yet** |
 
 ### Environment Variables (`.env`)
 
@@ -323,30 +346,28 @@ ACCESS_EXPIRE_MINUTES=30
 
 | # | Location | Status | Issue |
 |---|---|---|---|
-| 1 | `envoriment.py` | ✅ Fixed | `super().__init__()` is correct |
-| 2 | `envoriment.py` | ✅ Fixed | `step()` is implemented with battery/grid logic, SoC tracking, penalties, and proper return signature |
-| 3 | `envoriment.py:32` | ❌ Open | `observation_space shape=(31,)` mismatches actual combined CSV output (25 cols → shape `(26,)` with SoC). Must align before training. |
-| 4 | `IDM_DAM_features.py` | ✅ Fixed | DAM columns are renamed to `DAM_Price`, `DAM_Vol_Sale`, `DAM_Vol_Buy` |
-| 5 | `envoriment.py` | ❌ Open | Hardware params (`max_batt_capacity`, `max_batt_power`, `max_grid_capacity`) are hardcoded; should be loaded from `SystemConfig` |
-| 6 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM is active. Training dataset has IDM columns but live pipeline does not. |
-| 7 | General | ❌ Open | No RL training script exists (no SB3 / RLlib setup, no training loop, no checkpointing) |
-| 8 | `envoriment.py` | ❌ Open | Reward function is simplified — missing LCOS degradation cost and outage reserve penalty (`SoC < min_reserve` when `Grid == 0`) |
-| 9 | `preprocessing.py` | ❌ Open | `drop_features()` has syntax bug (list-in-list); `normalize_features()` is a stub; not called anywhere |
-| 10 | `data_providers/` | ❌ Open | Column mismatch between training dataset (v9, 27 cols) and live combined output (25 cols): live has `Day_sin`, `Day_cos`, `hours_until_outage`, `next_outage_duration`; v9 has `IDM_*`, `Avg_Weighted_Price`, `outage_risk` |
+| 1 | `envoriment.py` | ✅ Fixed | `super().__init__()` correct; full `step()` implemented with battery/grid logic, SoC tracking, reward, proper return signature |
+| 2 | `envoriment.py` | ✅ Fixed | Reward function complete: market P&L, LCOS, unmet load, mismatch, soft SoC, outage reserve, pre-outage bonus |
+| 3 | `envoriment.py` | ✅ Fixed | `observation_space` shape is dynamic `(n_features + 1,)`; no longer hardcoded to `(31,)` |
+| 4 | `IDM_DAM_features.py` | ✅ Fixed | DAM columns renamed to `DAM_Price`, `DAM_Vol_Buy`, `DAM_Vol_Sale` |
+| 5 | `data_providers/` | ✅ Fixed | Column mismatch resolved — v10 dataset aligns with live combined output (25 cols each) |
+| 6 | `envoriment.py` | ❌ Open | Hardware params (`max_batt_capacity`, `max_batt_power`, `lcos`, etc.) hardcoded; should be loaded from `SystemConfig` |
+| 7 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active; v10 training dataset has no IDM either |
+| 8 | General | ❌ Open | No RL training script (no SB3 / RLlib setup, no training loop, no checkpointing) |
+| 9 | `preprocessing.py` | ❌ Open | File does not exist; no feature normalization/dropping in the pipeline |
+| 10 | `backend/routers/predictions.py` | ❌ Open | File exists but is empty — no inference endpoints; `AgentPredictions` model defined in ORM but unused |
 | 11 | `requirements.txt` | ❌ Open | Missing RL dependencies: `stable-baselines3`, `torch`, `tensorboard` |
 
 ---
 
 ## Next Steps (Logical Order)
 
-1. **Align columns**: reconcile training dataset (v9) with live combined output — either rebuild v10 with matching columns or strip live output to v9 schema.
-2. **Fix observation space**: update `observation_space shape` in `envoriment.py` to match the actual feature count after column alignment.
-3. **Complete reward function**: add LCOS cost (`battery.lcos × |energy_delta|`) and outage reserve penalty (`SoC < min_reserve` when `Grid == 0`).
-4. **Wire `SystemConfig` → Environment**: load battery/inverter/solar params from DB at env init instead of hardcoded values.
-5. **Add RL training script**: integrate SB3 (`PPO` or `SAC`) with the environment and training dataset; add checkpointing.
-6. **Fix `preprocessing.py`**: correct `drop_features()` syntax; implement `normalize_features()`; plug into training pipeline.
-7. **Re-enable IDM** in `IDM_DAM_features.py` for richer price signals and to close the training/live column gap.
-8. **Inference pipeline**: load trained model + call `data_combiner.combine()` → step through next-day schedule → return dispatch plan via new API endpoint.
+1. **Add RL training script**: integrate SB3 (`PPO` or `SAC`) with `envoriment.py` + `dataset_final.csv`; add checkpointing and TensorBoard logging.
+2. **Add RL dependencies** to `requirements.txt`: `stable-baselines3`, `torch`, `tensorboard`.
+3. **Wire `SystemConfig` → Environment**: load battery/inverter/solar/grid params from DB at env init instead of hardcoded values.
+4. **Implement `preprocessing.py`**: write `drop_features()` and `normalize_features()`; plug into training pipeline before feeding data to the env.
+5. **Inference pipeline** (`backend/routers/predictions.py`): load trained model + call `data_combiner.combine()` → step through 96-step schedule → store results in `AgentPredictions` table → expose via API.
+6. **Re-enable IDM** in `IDM_DAM_features.py` for richer price signals (requires rebuilding dataset to v11 with IDM columns).
 
 ---
 

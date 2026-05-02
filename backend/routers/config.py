@@ -21,7 +21,7 @@ def get_config(config_name: str, db: Session = Depends(get_db), user = Depends(g
     if config is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Wrong config name")
     if user.id != config.user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your congif")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your config")
     return config
 
 

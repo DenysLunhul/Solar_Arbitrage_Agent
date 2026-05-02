@@ -2,8 +2,10 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pandas as pd
- 
- 
+
+from backend.schemas.schemas import SiteConfig
+
+
 class Environment(gym.Env):
     """
     EMS RL-середовище. Пріоритет покриття навантаження:
@@ -16,30 +18,30 @@ class Environment(gym.Env):
         - SoC нижче динамічного резерву під час/перед аутажем → великий штраф
     """
  
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, config: SiteConfig):
         super().__init__()
  
         self.df = df
- 
+
         # ── Батарея ───────────────────────────────────────────────
-        self.max_batt_capacity    = 2.0    # кВт·год
-        self.max_batt_power       = 1.0    # кВт/год
-        self.max_batt_power_ts    = self.max_batt_power / 4   # кВт·год за таймстеп
-        self.batt_efficiency      = 0.95
-        self.lcos                 = 1.5    # UAH/кВт·год деградації
- 
+        self.max_batt_capacity    = config.battery.battery_capacity_kwh
+        self.max_batt_power       = config.battery.battery_max_charge_power
+        self.max_batt_power_ts    = self.max_batt_power / 4
+        self.batt_efficiency      = config.battery.battery_efficiency
+        self.lcos                 = config.battery.battery_lcos
+
         # М'які межі SoC — агент штрафується за їх порушення,
         # але НЕ обмежується clip(). Може порушити якщо вигідно.
-        self.soc_soft_min         = 0.20   # нижче → м'який штраф
-        self.soc_soft_max         = 0.80   # вище  → м'який штраф
- 
+        self.soc_soft_min         = config.battery.battery_min_reserve / 100
+        self.soc_soft_max         = 0.80
+
         # ── Мережа ───────────────────────────────────────────────
-        self.max_grid_capacity    = 5.0
+        self.max_grid_capacity    = config.grid.grid_capacity
         self.max_grid_capacity_ts = self.max_grid_capacity / 4
- 
+
         # ── Сонячні панелі ────────────────────────────────────────
-        self.solar_peak_power_kw  = 3.0
-        self.solar_efficiency     = 0.18
+        self.solar_peak_power_kw  = config.solar.solar_peak_power
+        self.solar_efficiency     = config.solar.solar_efficiency
         self.panel_area_m2        = (self.solar_peak_power_kw * 1000) / (1000 * self.solar_efficiency)
  
         # ── Початковий стан ───────────────────────────────────────
