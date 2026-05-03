@@ -6,7 +6,7 @@ Build an autonomous RL agent that optimally manages energy flows in a hybrid nod
 1. **Maximize profit** from energy arbitrage on the Ukrainian Day-Ahead Market (DAM) and Intraday Market (IDM).
 2. **Guarantee energy autonomy** during planned/predicted power outages by maintaining a sufficient State of Charge (SoC) reserve.
 3. **Minimize battery degradation** by incorporating Levelized Cost of Storage (LCOS) into the reward function.
-4. **Scale to any hardware** (PV capacity, BESS size, inverter power) via per-user `SystemConfig` stored in the DB — no retraining of the architecture required.
+4. **Scale to any hardware** (PV capacity, BESS size, inverter power) via per-user `SystemConfig` stored in the DB — each config gets its own trained model.
 
 ---
 
@@ -351,22 +351,22 @@ ACCESS_EXPIRE_MINUTES=30
 | 3 | `envoriment.py` | ✅ Fixed | `observation_space` shape is dynamic `(n_features + 1,)`; no longer hardcoded to `(31,)` |
 | 4 | `IDM_DAM_features.py` | ✅ Fixed | DAM columns renamed to `DAM_Price`, `DAM_Vol_Buy`, `DAM_Vol_Sale` |
 | 5 | `data_providers/` | ✅ Fixed | Column mismatch resolved — v10 dataset aligns with live combined output (25 cols each) |
-| 6 | `envoriment.py` | ❌ Open | Hardware params (`max_batt_capacity`, `max_batt_power`, `lcos`, etc.) hardcoded; should be loaded from `SystemConfig` |
+| 6 | `envoriment.py` | ✅ Fixed | Hardware params loaded from `SiteConfig` passed at construction — no longer hardcoded |
 | 7 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active; v10 training dataset has no IDM either |
-| 8 | General | ❌ Open | No RL training script (no SB3 / RLlib setup, no training loop, no checkpointing) |
+| 8 | General | ✅ Fixed | Training triggered via `BackgroundTasks` on `POST /config/`; `backend/core/trainer.py` trains PPO with SB3, uploads model to MinIO as `{config_id}.zip`, writes status to `agent_models` table |
 | 9 | `preprocessing.py` | ❌ Open | File does not exist; no feature normalization/dropping in the pipeline |
-| 10 | `backend/routers/predictions.py` | ❌ Open | File exists but is empty — no inference endpoints; `AgentPredictions` model defined in ORM but unused |
-| 11 | `requirements.txt` | ❌ Open | Missing RL dependencies: `stable-baselines3`, `torch`, `tensorboard` |
+| 10 | `backend/routers/predictions.py` | ❌ Open | File exists but is incomplete — no inference loop yet; `AgentPredictions` and `AgentModels` ORM models defined |
+| 11 | `requirements.txt` | ✅ Fixed | Added `stable-baselines3`, `torch`, `tensorboard`, `boto3` |
 
 ---
 
 ## Next Steps (Logical Order)
 
-1. **Add RL training script**: integrate SB3 (`PPO` or `SAC`) with `envoriment.py` + `dataset_final.csv`; add checkpointing and TensorBoard logging.
+1. **Add RL training script**: integrate SB3 (`PPO` or `SAC`) with `envoriment.py` + `dataset_final.csv`; add checkpointing and TensorBoard logging. Model is trained **per `SystemConfig`** and saved as `models/{config_id}.zip`.
 2. **Add RL dependencies** to `requirements.txt`: `stable-baselines3`, `torch`, `tensorboard`.
-3. **Wire `SystemConfig` → Environment**: load battery/inverter/solar/grid params from DB at env init instead of hardcoded values.
+3. **Wire `SystemConfig` → Environment**: load battery/inverter/solar/grid params from DB at training time — each config trains its own model with its own hardware params.
 4. **Implement `preprocessing.py`**: write `drop_features()` and `normalize_features()`; plug into training pipeline before feeding data to the env.
-5. **Inference pipeline** (`backend/routers/predictions.py`): load trained model + call `data_combiner.combine()` → step through 96-step schedule → store results in `AgentPredictions` table → expose via API.
+5. **Inference pipeline** (`backend/routers/predictions.py`): load `models/{config_id}.zip` → call `data_combiner.combine()` → step through 96-step schedule → store results in `AgentPredictions` table → expose via API. Return `404` if model for that config hasn't been trained yet.
 6. **Re-enable IDM** in `IDM_DAM_features.py` for richer price signals (requires rebuilding dataset to v11 with IDM columns).
 
 ---

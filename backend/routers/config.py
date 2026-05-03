@@ -1,18 +1,26 @@
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from backend.core.database import get_db
 from backend.schemas.schemas import SiteConfig, SystemConfigResponse
 
 from backend.security.security import get_current_user
 from backend.core.database import save_to_db
-from backend.models.site import SystemConfig, User
+from backend.models.site import SystemConfig
+from backend.core.trainer import train_model_for_config
 
 router = APIRouter(prefix="/config", tags=["config"])
 
-@router.post("/")
-def save_config(config_name: str, settings: SiteConfig, db: Session = Depends(get_db), user = Depends(get_current_user)) -> SystemConfigResponse:
+@router.post("/", status_code=status.HTTP_201_CREATED)
+def save_config(
+    config_name: str,
+    settings: SiteConfig,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+) -> SystemConfigResponse:
     config_in_db = SystemConfig(config_name=config_name, settings=settings.model_dump(), user_id=user.id)
     save_to_db(db, config_in_db)
+    background_tasks.add_task(train_model_for_config, config_in_db.id)
     return config_in_db
 
 @router.get("/")
