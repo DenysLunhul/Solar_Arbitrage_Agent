@@ -12,3 +12,7 @@ pyjwt
 python-dotenv
 pwdlib
 pydantic
+stable-baselines3
+torch
+tensorboard
+boto3
