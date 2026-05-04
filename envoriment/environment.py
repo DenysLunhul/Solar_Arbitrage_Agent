@@ -7,10 +7,11 @@ import pandas as pd
  
 class Environment(gym.Env):
  
-    def __init__(self, df: pd.DataFrame, system_config: dict):
+    def __init__(self, df_raw: pd.DataFrame, df: pd.DataFrame, system_config: dict):
         super().__init__()
  
         self.df = df
+        self.df_raw = df_raw
  
         batt  = system_config['battery']
         solar = system_config['solar']
@@ -105,7 +106,7 @@ class Environment(gym.Env):
     # ─────────────────────────────────────────────────────────────
     def step(self, action):
  
-        row = self.df.iloc[self.curr_step]
+        row = self.df_raw.iloc[self.curr_step]
  
         # ── Дані поточного таймстепу ──────────────────────────────
         curr_price         = row['DAM_Price'] / 1000
@@ -193,11 +194,7 @@ class Environment(gym.Env):
                     unmet_load = net_demand_after_batt - actual_grid_ts
             else:
                 if grid_power_ts < 0:
-                    actual_grid_ts = max(
-                        -solar_export_possible,
-                        -self.max_grid_capacity_ts,
-                        grid_power_ts
-                    )
+                    actual_grid_ts = max( -solar_export_possible, -self.max_grid_capacity_ts, grid_power_ts)
                 else:
                     actual_grid_ts = 0.0
         else:
