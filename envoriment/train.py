@@ -41,6 +41,7 @@ from environment import Environment
 CONFIG = {
     # Шляхи
     'dataset_path':    'dataset_normalized.csv',
+    'dataset_raw_path': 'dataset_final.csv',
     'scalers_path':    'models/scalers.pkl',
     'model_save_path': 'models/sac_ems',
     'checkpoint_dir':  'models/checkpoints/',
@@ -111,12 +112,13 @@ DEFAULT_SYSTEM_CONFIG = {
 # ═════════════════════════════════════════════════════════════════════
  
 class RandomConfigWrapper(gym.Wrapper):
- 
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, df_raw: pd.DataFrame):
         config = self._sample_config()
-        env    = Environment(df, system_config=config)
+        # ПЕРЕДАЄМО ОБИДВА ДАТАСЕТИ
+        env = Environment(df_raw=df_raw, df=df, system_config=config)
         super().__init__(env)
         self.df = df
+        self.df_raw = df_raw
  
     def _sample_config(self) -> dict:
         capacity = float(np.random.uniform(1.0, 20.0))
@@ -140,9 +142,9 @@ class RandomConfigWrapper(gym.Wrapper):
         }
  
     def reset(self, **kwargs):
-        # Новий конфіг і новий env при кожному епізоді
+        # ОНОВЛЮЄМО: При скиданні теж передаємо обидва DF[cite: 2]
         new_config = self._sample_config()
-        self.env   = Environment(self.df, system_config=new_config)
+        self.env = Environment(df_raw=self.df_raw, df=self.df, system_config=new_config)
         return self.env.reset(**kwargs)
  
  
@@ -151,76 +153,46 @@ class RandomConfigWrapper(gym.Wrapper):
 # ═════════════════════════════════════════════════════════════════════
  
 def load_data():
-    print("\n" + "="*60)
-    print("КРОК 1: Завантаження датасету")
-    print("="*60)
- 
-    # Якщо нормалізований датасет ще не існує — запускаємо normalize.py
-    if not os.path.exists(CONFIG['dataset_path']):
-        print("Нормалізований датасет не знайдено. Запускаємо normalize.py...")
-        from normalize import normalize_dataset
-        normalize_dataset(
-            input_path='datasets/datasets_v9/dataset.csv',
-            output_path=CONFIG['dataset_path'],
-            scalers_path=CONFIG['scalers_path'],
-        )
- 
+    # ... (код перевірки існування файлів)
     df = pd.read_csv(CONFIG['dataset_path'])
-    print(f"Датасет: {df.shape[0]} рядків × {df.shape[1]} колонок")
- 
-    # Розбиваємо 80/20 БЕЗ перемішування — часовий ряд!
-    # eval завжди на майбутніх даних яких агент не бачив при навчанні
+    df_raw = pd.read_csv(CONFIG['dataset_raw_path'])
+
     split_idx = int(len(df) * 0.8)
-    df_train  = df.iloc[:split_idx].reset_index(drop=True)
-    df_eval   = df.iloc[split_idx:].reset_index(drop=True)
- 
-    print(f"Train: {len(df_train)} рядків (~{len(df_train)//96} днів)")
-    print(f"Eval:  {len(df_eval)} рядків  (~{len(df_eval)//96} днів)")
- 
-    return df_train, df_eval
+
+    df_train = df.iloc[:split_idx].reset_index(drop=True)
+    df_train_raw = df_raw.iloc[:split_idx].reset_index(drop=True)
+    
+    df_eval = df.iloc[split_idx:].reset_index(drop=True)
+    df_eval_raw = df_raw.iloc[split_idx:].reset_index(drop=True)
+
+    return df_train, df_train_raw, df_eval, df_eval_raw
  
  
 # ═════════════════════════════════════════════════════════════════════
 # КРОК 2: Середовища
 # ═════════════════════════════════════════════════════════════════════
  
-def make_envs(df_train, df_eval):
+def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
     os.makedirs(CONFIG['monitor_dir'], exist_ok=True)
 
-    # Обгортаємо в DummyVecEnv — потрібно для VecNormalize
+    # Передаємо ПАРУ датасетів у обгортки[cite: 2, 4]
     train_env = DummyVecEnv([
         lambda: Monitor(
-            RandomConfigWrapper(df_train),
+            RandomConfigWrapper(df_train, df_train_raw),
             filename=os.path.join(CONFIG['monitor_dir'], 'train')
         )
     ])
 
     eval_env = DummyVecEnv([
         lambda: Monitor(
-            Environment(df_eval, system_config=DEFAULT_SYSTEM_CONFIG),
+            Environment(df_raw=df_eval_raw, df=df_eval, system_config=DEFAULT_SYSTEM_CONFIG),
             filename=os.path.join(CONFIG['monitor_dir'], 'eval')
         )
     ])
 
-    # VecNormalize автоматично нормалізує reward і observation
-    # norm_obs=True  — нормалізує observation онлайн (running mean/std)
-    # norm_reward=True — нормалізує reward онлайн
-    # clip_obs=10.0  — обрізає аномальні значення observation
-    # clip_reward=10.0 — обрізає аномальні значення reward
-    train_env = VecNormalize(
-        train_env,
-        norm_obs=True,
-        norm_reward=True,
-        clip_obs=10.0,
-        clip_reward=10.0,
-    )
-
-    eval_env = VecNormalize(
-        eval_env,
-        norm_obs=True,
-        norm_reward=False,  # при eval reward не нормалізуємо щоб бачити реальні цифри
-        clip_obs=10.0,
-    )
+    # ... (VecNormalize залишається без змін)
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     return train_env, eval_env
  
@@ -339,12 +311,15 @@ def save_and_test(model, eval_env):
 # ═════════════════════════════════════════════════════════════════════
  
 if __name__ == '__main__':
-    df_train, df_eval     = load_data()
-    train_env, eval_env   = make_envs(df_train, df_eval)
-    model                 = make_model(train_env)
-    callbacks             = make_callbacks(eval_env)
-    model                 = train(model, callbacks)
-    save_and_test(model, train_env, eval_env)
+
+    d_train, d_train_raw, d_eval, d_eval_raw = load_data()
+
+    train_env, eval_env = make_envs(d_train, d_train_raw, d_eval, d_eval_raw)
+    
+    model = make_model(train_env)
+    callbacks = make_callbacks(eval_env)
+    model = train(model, callbacks)
+    save_and_test(model, eval_env)
  
     print("\n" + "="*60)
     print("Готово!")

@@ -66,65 +66,40 @@ def run_inference(
     initial_soc:   float = 0.5,
 ) -> dict:
     """
-    Параметри:
-        df_raw        — сирий (ненормалізований) DataFrame.
-                        96 рядків для одного дня або більше.
-                        Колонки мають відповідати датасету.
-        system_config — параметри заліза клієнта з БД:
-                        battery, solar, inverter
-        model         — завантажена SAC модель (SAC.load)
-        scalers       — завантажені scalers (pickle.load)
-        initial_soc   — поточний заряд батареї з BMS (0.0–1.0)
- 
-    Повертає словник:
-        {
-            "dispatch_plan": [ ...список з N словників... ],
-            "summary":       { ...підсумки... }
-        }
- 
-    Кожен елемент dispatch_plan — один таймстеп (15 хвилин):
-        step            — індекс (0..N-1)
-        action_battery  — дія батареї від агента (-1..+1)
-        action_grid     — дія мережі від агента (-1..+1)
-        soc             — SoC після цього кроку
-        target_soc      — динамічна ціль резерву
-        solar_gen_kwh   — генерація сонця
-        grid_kwh        — обмін з мережею (+ купівля, - продаж)
-        unmet_load_kwh  — непокрите навантаження (= 0 в нормі)
-        lcos_cost       — вартість деградації батареї за крок
-        reward          — нагорода за крок
+    Виконує інференс моделі, використовуючи сирі дані для фізики 
+    та нормалізовані дані для нейромережі.[cite: 2, 3]
     """
- 
-    # ── 1. Нормалізуємо сирі дані ─────────────────────────────────
-    # normalize_row застосовує ті самі scaler-и що були при навчанні
+
+    # ── 1. Створюємо нормалізований датасет для моделі ─────────────
+    # Проганяємо кожен рядок сирих даних через скалери
     df_norm = pd.DataFrame([
         normalize_row(df_raw.iloc[i], scalers)
         for i in range(len(df_raw))
     ])
- 
-    # ── 2. Інстанціюємо Environment з конфігом цього клієнта ──────
-    # Environment — новий об'єкт при кожному запиті
-    # model — той самий глобальний об'єкт, не змінюється
-    env = Environment(df_norm, system_config=system_config)
- 
-    # ── 3. Виставляємо початковий SoC ────────────────────────────
-    # reset() скидає soc на 0.5, тому виставляємо реальний після
+
+    # ── 2. Створюємо середовище з ДВОМА датасетами ────────────────
+    # Передаємо df_raw для розрахунків у step()
+    # Передаємо df_norm (як df) для спостережень у get_observe()[cite: 2]
+    env = Environment(df_raw=df_raw, df=df_norm, system_config=system_config)
+
+    # ── 3. Ініціалізація стану та SoC ─────────────────────────────
     obs, _ = env.reset()
+    # Встановлюємо реальний SoC, отриманий від інвертора/BMS[cite: 3]
     env.soc = float(np.clip(initial_soc, 0.0, 1.0))
-    obs = env.get_observe()   # перераховуємо observation з новим soc
- 
-    # ── 4. Проганяємо модель крок за кроком ──────────────────────
+    # Оновлюємо початкове спостереження з урахуванням нового SoC[cite: 2, 3]
+    obs = env.get_observe()   
+
+    # ── 4. Генерація плану (Step-by-step) ────────────────────────
     dispatch_plan = []
- 
+
     while True:
-        # model.predict — це і є "предікшин"
-        # obs:   numpy array shape=(N_features + 1,) — всі фічі + SoC
-        # action: numpy array shape=(2,) — [battery_action, grid_action]
-        # deterministic=True — обов'язково при інференсі (без exploration)
+        # Отримуємо дію від моделі (deterministic=True для стабільності)[cite: 3]
         action, _state = model.predict(obs, deterministic=True)
- 
+
+        # Робимо крок у середовищі[cite: 2, 3]
         obs, reward, terminated, truncated, info = env.step(action)
- 
+
+        # Додаємо результати кроку в план[cite: 3]
         dispatch_plan.append({
             'step':           env.curr_step - 1,
             'action_battery': round(float(action[0]), 4),
@@ -137,30 +112,24 @@ def run_inference(
             'lcos_cost':      round(float(info['lcos_cost']), 4),
             'reward':         round(float(reward), 4),
         })
- 
+
         if terminated or truncated:
             break
- 
-    # ── 5. Підсумки ───────────────────────────────────────────────
-    total_reward = sum(x['reward']         for x in dispatch_plan)
-    bought_kwh   = sum(x['grid_kwh']       for x in dispatch_plan if x['grid_kwh'] > 0)
-    sold_kwh     = sum(abs(x['grid_kwh'])  for x in dispatch_plan if x['grid_kwh'] < 0)
-    solar_kwh    = sum(x['solar_gen_kwh']  for x in dispatch_plan)
-    unmet_kwh    = sum(x['unmet_load_kwh'] for x in dispatch_plan)
-    lcos_total   = sum(x['lcos_cost']      for x in dispatch_plan)
- 
+
+    # ── 5. Формування підсумків ──────────────────────────────────
+    # Розрахунки ведуться на основі реальних фізичних величин із df_raw[cite: 2, 3]
     summary = {
-        'total_reward_uah': round(total_reward, 2),
-        'bought_kwh':       round(bought_kwh, 3),
-        'sold_kwh':         round(sold_kwh, 3),
-        'solar_kwh':        round(solar_kwh, 3),
-        'unmet_load_kwh':   round(unmet_kwh, 4),
-        'lcos_total_uah':   round(lcos_total, 3),
+        'total_reward_uah': round(sum(x['reward'] for x in dispatch_plan), 2),
+        'bought_kwh':       round(sum(x['grid_kwh'] for x in dispatch_plan if x['grid_kwh'] > 0), 3),
+        'sold_kwh':         round(sum(abs(x['grid_kwh']) for x in dispatch_plan if x['grid_kwh'] < 0), 3),
+        'solar_kwh':        round(sum(x['solar_gen_kwh'] for x in dispatch_plan), 3),
+        'unmet_load_kwh':   round(sum(x['unmet_load_kwh'] for x in dispatch_plan), 4),
+        'lcos_total_uah':   round(sum(x['lcos_cost'] for x in dispatch_plan), 3),
         'initial_soc':      round(initial_soc, 3),
         'final_soc':        dispatch_plan[-1]['soc'] if dispatch_plan else initial_soc,
         'steps':            len(dispatch_plan),
     }
- 
+
     return {
         'dispatch_plan': dispatch_plan,
         'summary':       summary,
