@@ -17,8 +17,22 @@ ds_project_demo/
 ├── docker-compose.yml
 ├── requirements.txt
 ├── .env                                   # DATABASE_URL, SECRET_KEY, ALGORITHM, ACCESS_EXPIRE_MINUTES
-├── envoriment/
-│   └── envoriment.py                      # Gymnasium RL environment (fully implemented)
+├── envoriment/                            # (folder name typo — kept as-is)
+│   ├── environment.py                     # Gymnasium RL environment (fully implemented)
+│   ├── train.py                           # Standalone SAC training script (domain randomization)
+│   ├── inference.py                       # Inference module: run_inference() for FastAPI integration
+│   ├── normalize.py                       # Feature normalization: drop, scale, save scalers.pkl
+│   ├── dataset_final.csv                  # Copy of training dataset (25 cols, 35 041 rows)
+│   ├── dataset_normalized.csv             # Normalized training dataset (17 cols, used by train.py)
+│   ├── models/                            # Trained model artifacts
+│   │   ├── sac_ems.zip                    # Final SAC model
+│   │   ├── best/best_model.zip            # Best checkpoint by eval reward
+│   │   ├── checkpoints/                   # Periodic checkpoints (every 50k steps)
+│   │   └── scalers.pkl                    # sklearn scalers fitted on training data
+│   └── logs/
+│       ├── tensorboard/SAC_*/             # TensorBoard event files (runs SAC_4 … SAC_18+)
+│       ├── monitor/                       # SB3 Monitor CSV logs
+│       └── eval/                          # EvalCallback logs
 ├── data_providers/
 │   ├── __init__.py
 │   ├── orchestrator/
@@ -27,7 +41,7 @@ ds_project_demo/
 │   │   ├── combined.csv                   # Last generated live dataset (96 rows × 25 cols)
 │   │   └── .cache.sqlite                  # Open-Meteo API cache
 │   ├── agent_data_preprocessing/
-│   │   └── __init__.py                    # preprocessing.py does NOT exist — no preprocessing in pipeline
+│   │   └── __init__.py                    # Normalization now lives in envoriment/normalize.py
 │   └── components/
 │       ├── __init__.py
 │       ├── market_manager/
@@ -65,13 +79,14 @@ ds_project_demo/
 │   ├── main.py                            # FastAPI app entry point
 │   ├── core/
 │   │   ├── database.py                    # SQLAlchemy engine + session (PostgreSQL)
-│   │   └── loader.py                      # Bulk-uploads DataFrame → History table
+│   │   ├── loader.py                      # Bulk-uploads DataFrame → History table
+│   │   └── trainer.py                     # PPO training via SB3; uploads model to MinIO; writes AgentModels status
 │   ├── models/
-│   │   └── site.py                        # ORM: User, SystemConfig, History, AgentPredictions
+│   │   └── site.py                        # ORM: User, SystemConfig, History, AgentPredictions, AgentModels
 │   ├── routers/
 │   │   ├── auth.py                        # POST /auth/login, POST /auth/register
-│   │   ├── config.py                      # POST /config/, GET /config/, GET /config/list
-│   │   └── predictions.py                 # EMPTY — placeholder for inference endpoints
+│   │   ├── config.py                      # POST /config/ (+ background training), GET /config/, GET /config/list
+│   │   └── predictions.py                 # GET /predictions/ — partial: time gate + data fetch, inference loop missing
 │   ├── schemas/
 │   │   └── schemas.py                     # Pydantic: SiteConfig, Battery, Inverter, SolarPanel, Grid, User
 │   └── security/
@@ -107,57 +122,192 @@ Hourly rows are expanded ×4 to match 15-min timesteps.
 
 ---
 
-## RL Environment (`envoriment/envoriment.py`)
+## RL Environment (`envoriment/environment.py`)
+
+### Dual-Dataset Architecture
+
+The environment takes **two DataFrames** at construction:
+
+| Argument | Purpose |
+|---|---|
+| `df_raw` | Raw (unnormalized) dataset — used in `step()` for physics calculations (prices, loads, grid status) |
+| `df` | Normalized dataset — used in `get_observe()` to feed the neural network |
+
+This separation means the agent sees normalized observations while the physics engine runs on real-scale values.
 
 ### Spaces
 
 ```python
 action_space      = Box(low=-1.0, high=1.0, shape=(2,), dtype=float32)
 observation_space = Box(low=-inf, high=inf, shape=(n_features + 1,), dtype=float32)
-  # n_features = df.shape[1] computed at runtime from input DataFrame
-  # With dataset_final.csv (24 feature cols after dropping timestamp) → shape=(25,)
+  # n_features = df.shape[1] (normalized df, after dropping 8 cols via normalize.py)
+  # With dataset_normalized.csv (17 feature cols) → shape=(18,)
 ```
 
 | Action dim | Meaning |
 |---|---|
 | `action[0]` | Battery: +1 = full charge, −1 = full discharge (scaled by `max_batt_power / 4`) |
-| `action[1]` | Grid exchange: +1 = full import, −1 = full export (scaled by `max_grid_capacity / 4`) |
+| `action[1]` | Grid exchange: −1 = full export, +1 = full import (note: `grid_power_ts = -action[1] × max_grid_capacity_ts`) |
 
-### Hardcoded Hardware Parameters (not yet loaded from `SystemConfig`)
+### Hardware Parameters (from `system_config` dict)
 
-| Parameter | Value |
-|---|---|
-| `max_batt_capacity` | 2.0 kWh |
-| `max_batt_power` | 1.0 kW |
-| `max_grid_capacity` | 5.0 kW |
-| `batt_efficiency` | 0.95 |
-| `lcos` | 1.5 UAH/kWh |
-| `soc_soft_min / soc_soft_max` | 0.20 / 0.80 |
-| `solar_peak_power` | 3.0 kW |
-| `solar_efficiency` | 0.18 |
-| Initial SoC | 0.5 |
+All hardware parameters are loaded from the `system_config` dict passed at construction — nothing is hardcoded.
+
+| `system_config` key | Environment attribute | Notes |
+|---|---|---|
+| `battery.capacity_kwh` | `max_batt_capacity` | kWh |
+| `battery.max_charge_power` | `max_batt_power` | kW; discharge limited by SoC |
+| `battery.efficiency` | `batt_efficiency` | Round-trip per half-cycle |
+| `battery.lcos` | `lcos` | UAH/kWh degradation cost |
+| `battery.min_reserve` | `soc_soft_min` | Percent → fraction (÷100) |
+| `inverter.max_power` | `max_grid_capacity` | kW; also limits grid import/export |
+| `inverter.price_to_buy` | `price_to_buy` | UAH/kWh fixed tariff for buying from grid |
+| `solar.peak_power` | `solar_peak_power_kw` | kWp |
+| `solar.efficiency` | `solar_efficiency` | η; panel area derived as `peak_power/(1000×η)` |
+
+Fixed constants: `soc_soft_max = 0.80`, timestep = 15 min (¼ hour), standard irradiance = 1000 W/m².
+
+Initial SoC at `reset()`: **0.0** (can be overridden externally for inference via `env.soc = initial_soc`).
 
 ### Observation Vector
 
-`np.append(df.iloc[step], soc)` — dataset row (24 feature columns, `timestamp` dropped) + SoC scalar → shape `(25,)`.
+`np.append(df_normalized.iloc[step], soc)` — 17 normalized feature columns + SoC scalar → shape `(18,)`.
 
-### Reward Function (fully implemented)
+### Reward Function
 
 ```
-reward = -(actual_grid_kwh × curr_price)      # market P&L
-       - lcos × |actual_batt_energy|           # LCOS degradation cost
-       - 50 × unmet_load                       # unmet load penalty [kWh]
-       - 2  × mismatch                         # power balance deviation
-       - quadratic SoC soft penalty            # outside [soc_soft_min, soc_soft_max]
-       - 30 × soc_deficit × log(outage_remaining_h)   # outage reserve (when Grid==0)
-       + 5  × urgency × soc_ready              # pre-outage charging bonus (when Grid==1, time_to_outage ≤ 3h)
+# 5.1 Market P&L
+if grid_import > 0:  reward -= grid_import × price_to_buy          # buy at fixed tariff
+else:                reward += |grid_export| × (DAM_Price / 1000)  # sell at DAM spot price
+
+# 5.2 Battery degradation
+reward -= lcos × |actual_batt_energy_abs|
+
+# 5.3 Unmet load penalty
+reward -= unmet_load × price_to_buy × 2
+
+# 5.4 Mismatch penalty (unrealistic grid action)
+reward -= 2.0 × |grid_commanded - grid_actual|
+
+# 5.5 Soft SoC boundary penalty
+if soc < soc_soft_min:  reward -= 3.0 × (soc_soft_min - soc)²
+if soc > soc_soft_max:  reward -= 3.0 × (soc - soc_soft_max)²
+
+# 5.6 Outage reserve penalty  (only when Grid==0)
+reward -= 30.0 × max(0, target_soc - soc) × log1p(outage_remaining_h)
+
+# 5.7 Pre-outage preparation bonus  (only when Grid==1 and hours_until_outage ≤ 3)
+urgency   = exp(-0.5 × hours_until_outage)
+soc_ready = min(soc, target_soc)
+reward += 5.0 × urgency × soc_ready
 ```
+
+`target_soc` is computed dynamically by `_calc_target_soc()`: estimated energy needed for the next outage (load minus solar) + 10% buffer, clamped to `[soc_soft_min, soc_soft_max]`.
 
 ### Episode
-- 96 steps per episode (one full day)
-- `terminated = True` at step 96; `truncated = False`
-- `reset()` returns `(observation, info)` per Gymnasium v26+ API
-- `step()` returns `(observation, reward, terminated, truncated, info)` with 10+ metrics in `info`
+- Terminated when `curr_step >= len(df) - 1` (handles episodes shorter than 96 steps if data is sliced)
+- `truncated = False` always
+- `info` dict returns: `soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `unmet_load_kwh`, `lcos_cost`, `mismatch`
+
+---
+
+## Normalization Pipeline (`envoriment/normalize.py`)
+
+Normalizes `dataset_final.csv` → `dataset_normalized.csv` and saves `scalers.pkl` for inference-time use.
+
+### Column treatment
+
+| Strategy | Columns |
+|---|---|
+| **Dropped** (8 cols) | `timestamp`, `Hour`, `Minute`, `Minute_sin`, `Minute_cos`, `Day`, `Day_of_week`, `Month` |
+| **log1p → StandardScaler** | `DAM_Price` |
+| **StandardScaler** | `Load`, `Temperature_2m`, `Shortwave_radiation`, `DAM_Vol_Buy`, `DAM_Vol_Sale` |
+| **MinMaxScaler [0, 1]** | `Global_tilted_irradiance_instant`, `hours_until_outage`, `outage_remaining_h`, `next_outage_duration` |
+| **Passthrough** | `Hour_sin`, `Hour_cos`, `Day_of_week_sin`, `Day_of_week_cos`, `Grid` |
+| **Also passthrough (not listed)** | `Day_sin`, `Day_cos` |
+
+Result: 17-column `dataset_normalized.csv`. Scaler objects serialized to `models/scalers.pkl`.
+
+### Inference-time normalization
+
+`normalize_row(row: pd.Series, scalers: dict) → pd.Series` applies the same transformations to a single live row from `data_combiner.py`. Used in `inference.py`.
+
+Run standalone: `python normalize.py --input dataset_final.csv --output dataset_normalized.csv --scalers models/scalers.pkl`
+
+---
+
+## Standalone Training Script (`envoriment/train.py`)
+
+Trains a **SAC** (Soft Actor-Critic) agent via Stable-Baselines3. Run from inside `envoriment/`:
+
+```bash
+python train.py
+```
+
+### Key design decisions
+
+**Domain randomization** via `RandomConfigWrapper(gym.Wrapper)`: on every `reset()` a new random `system_config` is sampled (battery 1–20 kWh, solar 1–10 kWp, inverter 3–15 kW, etc.). This trains a single universal model that generalizes across different hardware configs instead of per-config models.
+
+**VecNormalize**: obs normalized with `clip_obs=10.0`; reward normalized on train env, raw on eval env.
+
+**80/20 time-split**: first 80% rows → train, last 20% → eval (no shuffling to preserve time order).
+
+### Configuration
+
+| Parameter | Value |
+|---|---|
+| Algorithm | SAC (MlpPolicy) |
+| Total timesteps | 500 000 |
+| Buffer size | 100 000 |
+| Batch size | 256 |
+| Learning rate | 3e-4 |
+| Network arch | [256, 256] |
+| Gamma | 0.99 |
+| Entropy coef | auto |
+| Checkpoint frequency | every 50 000 steps |
+| Eval frequency | every 50 000 steps, 3 episodes |
+
+### Outputs
+
+| Path | Contents |
+|---|---|
+| `models/sac_ems.zip` | Final model |
+| `models/best/best_model.zip` | Best checkpoint by mean eval reward |
+| `models/checkpoints/sac_ems_*_steps.zip` | Periodic checkpoints |
+| `logs/tensorboard/SAC_N/` | TensorBoard event files |
+| `logs/monitor/` | SB3 Monitor CSV |
+| `logs/eval/` | EvalCallback results |
+
+View training: `tensorboard --logdir logs/tensorboard/`
+
+---
+
+## Inference Module (`envoriment/inference.py`)
+
+Designed to be called from the FastAPI predictions router.
+
+```python
+from inference import load_model_and_scalers, run_inference
+
+model, scalers = load_model_and_scalers('models/sac_ems', 'models/scalers.pkl')
+
+result = run_inference(
+    df_raw        = df_raw,          # 96-row raw DataFrame from data_combiner.py
+    system_config = system_config,   # dict from SystemConfig.settings
+    model         = model,
+    scalers       = scalers,
+    initial_soc   = 0.6,             # current SoC from BMS/inverter
+)
+# result = {'dispatch_plan': [...96 dicts...], 'summary': {...}}
+```
+
+**`dispatch_plan`** — list of 96 dicts per 15-min step:
+`step`, `action_battery`, `action_grid`, `soc`, `target_soc`, `solar_gen_kwh`, `grid_kwh`, `unmet_load_kwh`, `lcos_cost`, `reward`
+
+**`summary`** — aggregated day totals:
+`total_reward_uah`, `bought_kwh`, `sold_kwh`, `solar_kwh`, `unmet_load_kwh`, `lcos_total_uah`, `initial_soc`, `final_soc`, `steps`
+
+CLI usage: `python inference.py --data dataset_normalized.csv --model models/sac_ems --scalers models/scalers.pkl --soc 0.6`
 
 ---
 
@@ -165,11 +315,11 @@ reward = -(actual_grid_kwh × curr_price)      # market P&L
 
 ### `data_combiner.py` — Live Assembly
 
-Reads `SystemConfig` from DB (tilt, azimuth), then calls each provider for `tomorrow`:
-
 ```python
-combine(tilt, azimuth) → pd.DataFrame  # 96 rows × 25 cols
+combine(config_id, tilt=None, azimuth=None) → pd.DataFrame  # 96 rows × 25 cols
 ```
+
+Reads solar `tilt`/`azimuth` from the latest `SystemConfig` for `config_id` if not passed directly. Calls each provider for `tomorrow` and concatenates results.
 
 Output columns (combined.csv — 25 total):
 ```
@@ -227,6 +377,7 @@ Day_sin, Day_cos
 - **Size**: 35 041 rows (~365 days × 96 steps)
 - **Period**: Full year, 15-min resolution
 - **Column-aligned** with live `data_combiner.py` output
+- **Copy** also stored at `envoriment/dataset_final.csv` for local training runs
 
 ### Columns (25 total)
 
@@ -283,6 +434,7 @@ datasets_v9/sorted.csv
 
 ### Stack
 - **FastAPI** + **SQLAlchemy** + **PostgreSQL**
+- **MinIO** (S3-compatible object storage) for trained model `.zip` files
 - **JWT** (PyJWT, HS256, 30-min expiry) + **pwdlib** (Argon2 password hashing)
 
 ### Endpoints
@@ -292,33 +444,36 @@ datasets_v9/sorted.csv
 | GET | `/` | No | Health check |
 | POST | `/auth/register` | No | Create user |
 | POST | `/auth/login` | No | Get JWT token |
-| POST | `/config/` | JWT | Save `SiteConfig` for current user |
+| POST | `/config/` | JWT | Save `SiteConfig` + trigger PPO background training |
 | GET | `/config/?config_name=...` | JWT | Retrieve named config |
 | GET | `/config/list` | JWT | List all configs for current user |
+| GET | `/predictions/` | JWT | ❌ Partial — time gate + data fetch only; inference loop not wired |
 
 ### SiteConfig Schema
 
 ```python
 Battery:
-  battery_capacity_kwh: float
-  battery_min_reserve: float          # Minimum SoC % during outages
-  battery_lcos: float                 # Levelized cost [UAH/kWh]
-  battery_max_charge_power: float     # [kW]
-  battery_max_discharge_power: float  # [kW]
-  battery_efficiency: float
+  capacity_kwh: float
+  min_reserve: float = 10             # Minimum SoC % during outages
+  lcos: float                         # Levelized cost [UAH/kWh]
+  max_charge_power: float             # [kW]
+  max_discharge_power: float          # [kW]
+  efficiency: float = 1.0
 
 Inverter:
-  max_power: float                    # [kW]
+  max_power: float                    # [kW] — also used as max_grid_capacity in env
   efficiency: float
+  # Note: price_to_buy used by environment comes from inverter config in train.py;
+  # the Grid schema's price_buy_from_grid is defined but not yet wired to environment
 
 SolarPanel:
-  solar_peak_power: float             # [kWp]
-  solar_efficiency: float
-  solar_azimuth: float = 0            # 0 = South
-  solar_tilt: float = 35              # Degrees from horizontal
+  peak_power: float                   # [kWp]
+  efficiency: float
+  azimuth: float = 0                  # 0 = South
+  tilt: float = 35                    # Degrees from horizontal
 
 Grid:
-  grid_capacity: float                # [kW]
+  capacity: float                     # [kW]
   price_buy_from_grid: float          # [UAH/kWh]
 ```
 
@@ -329,7 +484,8 @@ Grid:
 | `users` | id, username, email, hashed_password |
 | `system_configs` | id, user_id (FK), config_name, settings (JSONB) |
 | `history` | id, user_id (FK), timestamp, data (JSONB) — per-timestep telemetry |
-| `agent_predictions` | id, user_id (FK), timestamp, data (JSONB) — **defined, no endpoints yet** |
+| `agent_predictions` | 30+ columns per step: battery/grid actions, energy flows, SoC, reward breakdown, outage state |
+| `agent_models` | id, config_id (FK), status (training\|ready\|failed), trained_at, total_timesteps, storage_path, mean_reward |
 
 ### Environment Variables (`.env`)
 
@@ -338,7 +494,22 @@ DATABASE_URL=postgresql://postgres:<password>@localhost:5432/ems_database
 SECRET_KEY=<hex secret>
 ALGORITHM=HS256
 ACCESS_EXPIRE_MINUTES=30
+MINIO_ENDPOINT=<host:port>
+MINIO_ROOT_USER=<user>
+MINIO_ROOT_PASSWORD=<password>
 ```
+
+### Backend Trainer (`backend/core/trainer.py`)
+
+Triggered as `BackgroundTask` on `POST /config/`. Uses **PPO** (not SAC). Workflow:
+1. Fetch `SystemConfig` from DB by `config_id`
+2. Load `datasets/dataset_v10/dataset_final.csv`, drop timestamp
+3. Create `Environment` with raw DataFrame and config settings
+4. Train PPO for **200 000** timesteps
+5. Save `.zip` to MinIO bucket `models` as `{config_id}.zip`
+6. Update `agent_models` row: status → `ready` / `failed`, path, timestamp
+
+Note: backend trainer uses **PPO + raw data** (no VecNormalize, no domain randomization). The standalone `envoriment/train.py` uses **SAC + normalized data + RandomConfigWrapper** and is the more capable training path.
 
 ---
 
@@ -346,57 +517,59 @@ ACCESS_EXPIRE_MINUTES=30
 
 | # | Location | Status | Issue |
 |---|---|---|---|
-| 1 | `envoriment.py` | ✅ Fixed | `super().__init__()` correct; full `step()` implemented with battery/grid logic, SoC tracking, reward, proper return signature |
-| 2 | `envoriment.py` | ✅ Fixed | Reward function complete: market P&L, LCOS, unmet load, mismatch, soft SoC, outage reserve, pre-outage bonus |
-| 3 | `envoriment.py` | ✅ Fixed | `observation_space` shape is dynamic `(n_features + 1,)`; no longer hardcoded to `(31,)` |
+| 1 | `environment.py` | ✅ Fixed | Full `step()` with battery/grid physics, SoC tracking, reward, correct Gymnasium return signature |
+| 2 | `environment.py` | ✅ Fixed | Reward function complete: market P&L, LCOS, unmet load, mismatch, soft SoC, outage reserve, pre-outage bonus |
+| 3 | `environment.py` | ✅ Fixed | `observation_space` shape is dynamic `(n_features + 1,)` — no longer hardcoded |
 | 4 | `IDM_DAM_features.py` | ✅ Fixed | DAM columns renamed to `DAM_Price`, `DAM_Vol_Buy`, `DAM_Vol_Sale` |
 | 5 | `data_providers/` | ✅ Fixed | Column mismatch resolved — v10 dataset aligns with live combined output (25 cols each) |
-| 6 | `envoriment.py` | ✅ Fixed | Hardware params loaded from `SiteConfig` passed at construction — no longer hardcoded |
-| 7 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active; v10 training dataset has no IDM either |
-| 8 | General | ✅ Fixed | Training triggered via `BackgroundTasks` on `POST /config/`; `backend/core/trainer.py` trains PPO with SB3, uploads model to MinIO as `{config_id}.zip`, writes status to `agent_models` table |
-| 9 | `preprocessing.py` | ❌ Open | File does not exist; no feature normalization/dropping in the pipeline |
-| 10 | `backend/routers/predictions.py` | ❌ Open | File exists but is incomplete — no inference loop yet; `AgentPredictions` and `AgentModels` ORM models defined |
-| 11 | `requirements.txt` | ✅ Fixed | Added `stable-baselines3`, `torch`, `tensorboard`, `boto3` |
+| 6 | `environment.py` | ✅ Fixed | All hardware params loaded from `system_config` dict — nothing hardcoded |
+| 7 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active; v10 training dataset has no IDM columns |
+| 8 | `backend/core/trainer.py` | ✅ Fixed | PPO training via BackgroundTasks on POST /config/; uploads to MinIO; writes AgentModels status |
+| 9 | `normalize.py` | ✅ Fixed | `envoriment/normalize.py` implemented: drops 8 cols, applies log/standard/minmax scalers, saves `scalers.pkl` |
+| 10 | `backend/routers/predictions.py` | ❌ Open | Time gate (≥14:00) and data fetch implemented; inference loop not yet wired; `run_inference()` in `inference.py` is ready to plug in |
+| 11 | `requirements.txt` | ⚠️ Partial | `stable-baselines3`, `torch`, `tensorboard`, `boto3` added ✅; missing: `scikit-learn` (needed by `normalize.py`), `psycopg2-binary` (PostgreSQL), `openpyxl` (OREE Excel), `uvicorn` |
+| 12 | Backend vs standalone training | ⚠️ Diverged | `backend/core/trainer.py` uses PPO + raw data (200k steps); `envoriment/train.py` uses SAC + VecNormalize + domain randomization (500k steps). These are separate pipelines — not yet unified |
 
 ---
 
 ## Next Steps (Logical Order)
 
-1. **Add RL training script**: integrate SB3 (`PPO` or `SAC`) with `envoriment.py` + `dataset_final.csv`; add checkpointing and TensorBoard logging. Model is trained **per `SystemConfig`** and saved as `models/{config_id}.zip`.
-2. **Add RL dependencies** to `requirements.txt`: `stable-baselines3`, `torch`, `tensorboard`.
-3. **Wire `SystemConfig` → Environment**: load battery/inverter/solar/grid params from DB at training time — each config trains its own model with its own hardware params.
-4. **Implement `preprocessing.py`**: write `drop_features()` and `normalize_features()`; plug into training pipeline before feeding data to the env.
-5. **Inference pipeline** (`backend/routers/predictions.py`): load `models/{config_id}.zip` → call `data_combiner.combine()` → step through 96-step schedule → store results in `AgentPredictions` table → expose via API. Return `404` if model for that config hasn't been trained yet.
-6. **Re-enable IDM** in `IDM_DAM_features.py` for richer price signals (requires rebuilding dataset to v11 with IDM columns).
+1. **Wire `inference.py` → `predictions.py`**: call `run_inference(df_raw, system_config, model, scalers)` inside `GET /predictions/`; load model from MinIO or local path; store results in `AgentPredictions` table. Return `404` if no trained model for that config.
+2. **Fix `requirements.txt`**: add `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn`.
+3. **Unify training pipelines**: decide whether to replace `backend/core/trainer.py` (PPO) with the SAC + VecNormalize approach from `envoriment/train.py`, or keep them for different use cases.
+4. **Re-enable IDM** in `IDM_DAM_features.py` for richer price signals (requires rebuilding dataset to v11 with IDM columns).
+5. **Wire `Grid.price_buy_from_grid`** from `SiteConfig` into the environment as `price_to_buy` (currently only set via `inverter.price_to_buy` in `train.py`'s hardcoded config).
 
 ---
 
 ## Python Dependencies
 
-From `requirements.txt` (confirmed present):
+Current `requirements.txt`:
 ```
-gymnasium
-numpy
-pandas
 fastapi
-uvicorn
-sqlalchemy
-psycopg2-binary
-pydantic
-PyJWT
-pwdlib[argon2]
-python-dotenv
+pandas
+numpy
+requests
 openmeteo-requests
 requests-cache
 retry-requests
-openpyxl
+gymnasium
 python-calamine
-requests
-```
-
-Missing (needed for RL training — not yet in `requirements.txt`):
-```
+sqlalchemy
+pyjwt
+python-dotenv
+pwdlib
+pydantic
 stable-baselines3
 torch
 tensorboard
+boto3
+```
+
+Missing (need to add):
+```
+scikit-learn       # required by envoriment/normalize.py (StandardScaler, MinMaxScaler)
+psycopg2-binary    # PostgreSQL driver for SQLAlchemy
+openpyxl           # Excel parsing for OREE DAM data
+uvicorn            # FastAPI ASGI server
 ```
