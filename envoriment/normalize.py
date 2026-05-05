@@ -37,6 +37,8 @@ STANDARD_COLS = [
     'Load',
     'Temperature_2m',
     'Shortwave_radiation',
+    'DAM_Vol_Buy',
+    'DAM_Vol_Sale',
 ]
  
 # MinMaxScaler → [0, 1]:
