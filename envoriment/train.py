@@ -125,7 +125,7 @@ class RandomConfigWrapper(gym.Wrapper):
         self.df_raw = df_raw
  
     def _sample_config(self) -> dict:
-        capacity = float(np.random.uniform(1.0, 20.0))
+        capacity = float(np.random.uniform(5.0, 15.0))
         return {
             'battery': {
                 'capacity_kwh':        capacity,
@@ -136,8 +136,8 @@ class RandomConfigWrapper(gym.Wrapper):
                 'min_reserve':         int(np.random.randint(10, 30)),
             },
             'solar': {
-                'peak_power':  float(np.random.uniform(1.0, 10.0)),
-                'efficiency':  float(np.random.uniform(0.15, 0.22)),
+                'peak_power':  float(np.random.uniform(5.0, 15.0)),
+                'efficiency':  float(np.random.uniform(0.17, 0.23)),
             },
             'inverter': {
                 'max_power': float(np.random.uniform(3.0, 15.0)),
