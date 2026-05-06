@@ -291,6 +291,7 @@ def save_and_test(model, eval_env):
     # Один тестовий епізод
     print("\nТестуємо один епізод...")
     obs, info = eval_env.reset()
+    total_money_earned = 0.0
     total_reward = 0.0
     total_unmet  = 0.0
     steps        = 0
@@ -299,15 +300,17 @@ def save_and_test(model, eval_env):
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = eval_env.step(action)
         total_reward += reward
+        total_money_earned += info.get('money_earned_ts', 0.0)
         total_unmet  += info.get('unmet_load_kwh', 0.0)
         steps        += 1
         if terminated or truncated:
             break
  
     print(f"Кроків:                  {steps}")
-    print(f"Сумарний reward:         {total_reward:.2f} UAH")
+    print(f"Сумарний reward:         {total_reward:.2f} ")
     print(f"Непокрите навантаження:  {total_unmet:.4f} кВт·год")
     print(f"Фінальний SoC:           {info['soc']:.3f}")
+    print(f"Заробили {total_money_earned:.2f} UAH")
  
  
 # ═════════════════════════════════════════════════════════════════════
