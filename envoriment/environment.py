@@ -266,6 +266,7 @@ class Environment(gym.Env):
             'unmet_load_kwh':    unmet_load,
             'lcos_cost':         lcos_cost,
             'mismatch':          mismatch,
+            'money_earned_ts':   money_earned_ts,
         }
  
         return observation, reward, terminated, truncated, info
