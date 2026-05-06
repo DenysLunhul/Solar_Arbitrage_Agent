@@ -290,7 +290,7 @@ def save_and_test(model, eval_env):
  
     # Один тестовий епізод
     print("\nТестуємо один епізод...")
-    obs, _ = eval_env.reset()
+    obs, info = eval_env.reset()
     total_reward = 0.0
     total_unmet  = 0.0
     steps        = 0
