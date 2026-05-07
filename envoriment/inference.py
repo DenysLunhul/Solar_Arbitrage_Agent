@@ -110,6 +110,7 @@ def run_inference(
             'grid_kwh':       round(float(info['actual_grid_kwh']), 4),
             'unmet_load_kwh': round(float(info['unmet_load_kwh']), 4),
             'lcos_cost':      round(float(info['lcos_cost']), 4),
+            'money_earned_ts': round(float(info['money_earned_ts'])), 
             'reward':         round(float(reward), 4),
         })
 
@@ -119,6 +120,7 @@ def run_inference(
     # ── 5. Формування підсумків ──────────────────────────────────
     # Розрахунки ведуться на основі реальних фізичних величин із df_raw[cite: 2, 3]
     summary = {
+        'total_money_earned': round(sum(x['money_earned_ts'] for x in dispatch_plan)),
         'total_reward_uah': round(sum(x['reward'] for x in dispatch_plan), 2),
         'bought_kwh':       round(sum(x['grid_kwh'] for x in dispatch_plan if x['grid_kwh'] > 0), 3),
         'sold_kwh':         round(sum(abs(x['grid_kwh']) for x in dispatch_plan if x['grid_kwh'] < 0), 3),

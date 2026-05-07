@@ -213,6 +213,11 @@ class Environment(gym.Env):
         else:
     # Продаємо в мережу — отримуємо ринкову ціну DAM
             reward += abs(actual_grid_ts) * curr_price
+
+        if(actual_grid_ts < 0):
+            money_earned_ts = abs(actual_grid_ts * curr_price)
+        else:
+            money_earned_ts = actual_grid_ts * self.price_to_buy
  
         # 5.2 Деградація батареї
         lcos_cost = self.lcos * actual_batt_energy_abs
@@ -266,7 +271,7 @@ class Environment(gym.Env):
             'unmet_load_kwh':    unmet_load,
             'lcos_cost':         lcos_cost,
             'mismatch':          mismatch,
-            'money_earned_ts':   money_earned_ts,
+            "money_earned_ts":   money_earned_ts,
         }
  
         return observation, reward, terminated, truncated, info

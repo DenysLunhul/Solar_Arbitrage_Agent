@@ -95,7 +95,7 @@ DEFAULT_SYSTEM_CONFIG = {
     },
     'inverter': {
         'max_power': 5.0,
-        'price_to_buy': 4.32
+        'price_to_buy': 10
     }
 }
 
@@ -141,7 +141,7 @@ class RandomConfigWrapper(gym.Wrapper):
             },
             'inverter': {
                 'max_power': float(np.random.uniform(3.0, 15.0)),
-                'price_to_buy' : 4.32
+                'price_to_buy' : 10
             },
         }
  
