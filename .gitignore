@@ -22,6 +22,9 @@ envoriment/logs/eval/
 # Inference results
 envoriment/results/
 
+# Trained models (local storage)
+backend/trained_models/
+
 # Data cache
 data_providers/orchestrator/.cache.sqlite
 data_providers/orchestrator/combined.csv

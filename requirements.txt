@@ -18,5 +18,4 @@ scikit-learn
 stable-baselines3
 torch
 tensorboard
-boto3
 openpyxl

@@ -31,67 +31,58 @@ class History(Base):
 class AgentPredictions(Base):
     __tablename__ = "predictions"
 
-    # ── Identity ──────────────────────────────────────────────────
     id        = Column(Integer, primary_key=True, index=True)
     user_id   = Column(Integer, ForeignKey("users.id"), index=True)
     date      = Column(Date, index=True)
-    step      = Column(Integer)       # 0–95 (15-min timestep index)
+    step      = Column(Integer)
     timestamp = Column(DateTime, index=True)
 
-    # ── Raw agent actions ─────────────────────────────────────────
-    battery_action = Column(Float)    # action[0] in [-1, 1]
-    grid_action    = Column(Float)    # action[1] in [-1, 1]
+    battery_action = Column(Float)
+    grid_action    = Column(Float)
 
-    # ── Energy flows (kWh per 15-min timestep) ────────────────────
-    load_kwh          = Column(Float)  # enterprise consumption
-    solar_kwh         = Column(Float)  # solar generation
-    solar_surplus_kwh = Column(Float)  # excess solar (exported or wasted)
-    battery_kwh       = Column(Float)  # actual kWh moved (+ charge, - discharge)
-    grid_kwh          = Column(Float)  # net grid exchange (+ buy, - sell)
-    unmet_load_kwh    = Column(Float)  # load not covered (blackout indicator)
+    load_kwh          = Column(Float)
+    solar_kwh         = Column(Float)
+    solar_surplus_kwh = Column(Float)
+    battery_kwh       = Column(Float)
+    grid_kwh          = Column(Float)
+    unmet_load_kwh    = Column(Float)
 
-    # ── Load coverage breakdown (for stacked charts / Sankey) ─────
-    solar_to_load_kwh    = Column(Float)  # solar directly covering load
-    solar_to_battery_kwh = Column(Float)  # solar going into battery
-    solar_to_grid_kwh    = Column(Float)  # solar exported to grid
-    battery_to_load_kwh  = Column(Float)  # battery discharge covering load
-    grid_to_load_kwh     = Column(Float)  # grid import covering load
-    grid_to_battery_kwh  = Column(Float)  # grid import charging battery
+    solar_to_load_kwh    = Column(Float)
+    solar_to_battery_kwh = Column(Float)
+    solar_to_grid_kwh    = Column(Float)
+    battery_to_load_kwh  = Column(Float)
+    grid_to_load_kwh     = Column(Float)
+    grid_to_battery_kwh  = Column(Float)
 
-    # ── Battery state ─────────────────────────────────────────────
-    soc        = Column(Float)         # state of charge [0, 1]
-    target_soc = Column(Float)         # dynamic reserve target computed by agent
-    lcos_cost  = Column(Float)         # battery degradation cost this step (UAH)
+    soc        = Column(Float)
+    target_soc = Column(Float)
+    lcos_cost  = Column(Float)
 
-    # ── Market ────────────────────────────────────────────────────
-    dam_price = Column(Float)          # UAH/kWh
+    dam_price = Column(Float)
 
-    # ── Grid / outage ─────────────────────────────────────────────
-    grid_status          = Column(Integer)  # 1 = on, 0 = outage
+    grid_status          = Column(Integer)
     hours_until_outage   = Column(Float)
-    outage_remaining_h   = Column(Float)    # hours left in current outage
-    next_outage_duration = Column(Float)    # predicted duration of next outage
+    outage_remaining_h   = Column(Float)
+    next_outage_duration = Column(Float)
 
-    # ── Agent quality ─────────────────────────────────────────────
-    mismatch = Column(Float)               # gap between requested and actual grid action
+    mismatch = Column(Float)
 
-    # ── Reward breakdown ──────────────────────────────────────────
-    reward_market      = Column(Float)  # P&L from grid trading
-    reward_lcos        = Column(Float)  # degradation penalty
-    reward_unmet       = Column(Float)  # unmet load penalty
-    reward_soc_soft    = Column(Float)  # soft SoC boundary penalty
-    reward_reserve     = Column(Float)  # outage reserve penalty
-    reward_preparation = Column(Float)  # pre-outage preparation bonus
-    reward_total       = Column(Float)  # sum of all reward components
+    reward_market      = Column(Float)
+    reward_lcos        = Column(Float)
+    reward_unmet       = Column(Float)
+    reward_soc_soft    = Column(Float)
+    reward_reserve     = Column(Float)
+    reward_preparation = Column(Float)
+    reward_total       = Column(Float)
 
 
 class AgentModels(Base):
     __tablename__ = "agent_models"
 
-    id               = Column(Integer, primary_key=True, index=True)
-    config_id        = Column(Integer, ForeignKey("system_configs.id"), index=True)
-    status           = Column(String)   # "training" | "ready" | "failed"
-    trained_at       = Column(DateTime)
-    total_timesteps  = Column(Integer)
-    storage_path     = Column(String)   # MinIO key: {config_id}.zip
-    mean_reward      = Column(Float, nullable=True)
+    id              = Column(Integer, primary_key=True, index=True)
+    config_id       = Column(Integer, ForeignKey("system_configs.id"), index=True)
+    status          = Column(String)
+    trained_at      = Column(DateTime)
+    total_timesteps = Column(Integer)
+    storage_path    = Column(String)
+    mean_reward     = Column(Float, nullable=True)
