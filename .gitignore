@@ -5,3 +5,23 @@ __pycache__/
 *.egg-info/
 .DS_Store
 .env
+
+# Trained model artifacts
+envoriment/models/checkpoints/
+envoriment/models/best/
+envoriment/models/*.zip
+envoriment/models/*.pkl
+
+# TensorBoard logs
+envoriment/logs/tensorboard/
+
+# Monitor & eval logs
+envoriment/logs/monitor/
+envoriment/logs/eval/
+
+# Inference results
+envoriment/results/
+
+# Data cache
+data_providers/orchestrator/.cache.sqlite
+data_providers/orchestrator/combined.csv

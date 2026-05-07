@@ -1,4 +1,5 @@
 fastapi
+uvicorn
 pandas
 numpy
 requests
@@ -8,11 +9,14 @@ retry-requests
 gymnasium
 python-calamine
 sqlalchemy
+psycopg2-binary
 pyjwt
 python-dotenv
 pwdlib
 pydantic
+scikit-learn
 stable-baselines3
 torch
 tensorboard
 boto3
+openpyxl

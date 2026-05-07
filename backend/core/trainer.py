@@ -9,11 +9,14 @@ from stable_baselines3 import PPO
 from backend.core.database import SessionLocal
 from backend.models.site import AgentModels, SystemConfig
 from backend.schemas.schemas import SiteConfig
-from envoriment.envoriment import Environment
+from envoriment.environment import Environment
+from envoriment.normalize import normalize_dataset
 
-DATASET_PATH = "datasets/dataset_v10/dataset_final.csv"
-TOTAL_TIMESTEPS = 200_000
-MINIO_BUCKET = "models"
+DATASET_PATH            = "datasets/dataset_v10/dataset_final.csv"
+DATASET_NORMALIZED_PATH = "envoriment/dataset_normalized.csv"
+SCALERS_PATH            = "envoriment/models/scalers.pkl"
+TOTAL_TIMESTEPS         = 200_000
+MINIO_BUCKET            = "models"
 
 
 def _minio_client():
@@ -32,6 +35,28 @@ def _ensure_bucket(client):
         client.create_bucket(Bucket=MINIO_BUCKET)
 
 
+def site_config_to_env_dict(site_config: SiteConfig) -> dict:
+    """Maps SiteConfig Pydantic model → system_config dict expected by Environment."""
+    return {
+        'battery': {
+            'capacity_kwh':        site_config.battery.battery_capacity_kwh,
+            'min_reserve':         site_config.battery.battery_min_reserve,
+            'lcos':                site_config.battery.battery_lcos,
+            'max_charge_power':    site_config.battery.battery_max_charge_power,
+            'max_discharge_power': site_config.battery.battery_max_discharge_power,
+            'efficiency':          site_config.battery.battery_efficiency,
+        },
+        'solar': {
+            'peak_power': site_config.solar.solar_peak_power,
+            'efficiency': site_config.solar.solar_efficiency,
+        },
+        'inverter': {
+            'max_power':    site_config.inverter.max_power,
+            'price_to_buy': site_config.grid.price_buy_from_grid,
+        },
+    }
+
+
 def train_model_for_config(config_id: int):
     db = SessionLocal()
     record = None
@@ -46,10 +71,16 @@ def train_model_for_config(config_id: int):
 
         config_row = db.query(SystemConfig).filter(SystemConfig.id == config_id).first()
         site_config = SiteConfig(**config_row.settings)
+        system_config = site_config_to_env_dict(site_config)
 
-        df = pd.read_csv(DATASET_PATH).drop(columns=["timestamp"])
+        df_raw = pd.read_csv(DATASET_PATH)
 
-        env = Environment(df, site_config)
+        # Use pre-built normalized dataset; rebuild if missing
+        if not os.path.exists(DATASET_NORMALIZED_PATH) or not os.path.exists(SCALERS_PATH):
+            normalize_dataset(DATASET_PATH, DATASET_NORMALIZED_PATH, SCALERS_PATH)
+        df_norm = pd.read_csv(DATASET_NORMALIZED_PATH)
+
+        env = Environment(df_raw=df_raw, df=df_norm, system_config=system_config)
         model = PPO("MlpPolicy", env, verbose=0)
         model.learn(total_timesteps=TOTAL_TIMESTEPS)
 
