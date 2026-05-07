@@ -52,7 +52,7 @@ CONFIG = {
     'total_timesteps': 500_000,
     'checkpoint_freq': 50_000,
     'log_interval':    1_000,
- 
+
     # SAC гіперпараметри
     'sac_params': {
         'buffer_size':    100_000,
@@ -269,7 +269,7 @@ def train(model, callbacks):
         total_timesteps=CONFIG['total_timesteps'],
         callback=callbacks,
         log_interval=CONFIG['log_interval'],
-        progress_bar=False,
+        progress_bar=True,
         reset_num_timesteps=True,
     )
  
@@ -326,6 +326,12 @@ if __name__ == '__main__':
     model = make_model(train_env)
     callbacks = make_callbacks(eval_env)
     model = train(model, callbacks)
+
+    obs_rms_path = 'models/obs_rms.pkl'
+    with open(obs_rms_path, 'wb') as f:
+        pickle.dump(train_env.obs_rms, f)
+    print(f"obs_rms → {obs_rms_path}")
+
     save_and_test(model, eval_env)
  
     print("\n" + "="*60)
@@ -333,4 +339,3 @@ if __name__ == '__main__':
     print(f"Модель:      {CONFIG['model_save_path']}.zip")
     print(f"Tensorboard: tensorboard --logdir {CONFIG['tensorboard_dir']}")
     print("="*60)
- 

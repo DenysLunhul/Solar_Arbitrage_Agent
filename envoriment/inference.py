@@ -3,103 +3,111 @@
 inference.py
 ============
 Запуск навченої моделі для отримання dispatch plan.
- 
+
 Використання з беку (FastAPI):
-    from inference import run_inference
-    result = run_inference(df_raw, system_config, initial_soc=0.6)
- 
+    from envoriment.inference import load_model_and_scalers, run_inference
+    model, scalers, obs_rms = load_model_and_scalers(...)
+    result = run_inference(df_raw, system_config, model, scalers, obs_rms=obs_rms)
+
 Використання з командного рядка:
-    python inference.py --data  datasets/dataset_normalized.csv
-                        --model models/sac_ems
+    python inference.py --data  dataset_final.csv
+                        --model models/best/best_model.zip
                         --scalers models/scalers.pkl
+                        --obsrms models/obs_rms.pkl
                         --soc 0.6
                         --days 1
 """
- 
+
 import os
 import argparse
 import pickle
 import numpy as np
 import pandas as pd
-from stable_baselines3 import SAC
- 
+
 from environment import Environment
 from normalize import normalize_row
- 
- 
-# ─────────────────────────────────────────────────────────────────────
-# Завантаження моделі і scalers
-#
-# Ці об'єкти повинні завантажуватись ОДИН РАЗ при старті сервера,
-# а не при кожному запиті. Тому виносимо в окрему функцію
-# і зберігаємо в глобальних змінних на рівні модуля.
-# ─────────────────────────────────────────────────────────────────────
- 
-def load_model_and_scalers(model_path: str, scalers_path: str):
+
+
+def load_model_and_scalers(
+    model_path: str,
+    scalers_path: str,
+    obs_rms_path: str = None,
+    model_cls=None,
+):
     """
-    Завантажує модель з .zip і scalers з .pkl.
-    Викликати один раз при старті — результат зберегти глобально.
+    Завантажує модель, scalers і obs_rms.
+    Викликати один раз при старті — результати зберегти глобально.
+
+    model_cls: SAC (default) або PPO — вказати явно якщо потрібно PPO.
     """
+    if model_cls is None:
+        from stable_baselines3 import SAC
+        model_cls = SAC
+
     print(f"Завантажуємо модель:  {model_path}")
-    model = SAC.load(model_path)
- 
+    model = model_cls.load(model_path)
+
     print(f"Завантажуємо scalers: {scalers_path}")
     with open(scalers_path, 'rb') as f:
         scalers = pickle.load(f)
- 
+
+    obs_rms = None
+    if obs_rms_path and os.path.exists(obs_rms_path):
+        print(f"Завантажуємо obs_rms: {obs_rms_path}")
+        with open(obs_rms_path, 'rb') as f:
+            obs_rms = pickle.load(f)
+    else:
+        print("obs_rms не знайдено — нормалізація спостережень вимкнена")
+
     print("Готово.\n")
-    return model, scalers
- 
- 
-# ─────────────────────────────────────────────────────────────────────
-# Головна функція інференсу
-#
-# Саме її викликає FastAPI роутер dispatch.py.
-# Приймає сирі дані + конфіг клієнта, повертає dispatch plan і summary.
-# ─────────────────────────────────────────────────────────────────────
- 
+    return model, scalers, obs_rms
+
+
 def run_inference(
     df_raw:        pd.DataFrame,
     system_config: dict,
-    model:         SAC,
+    model,
     scalers:       dict,
     initial_soc:   float = 0.5,
+    obs_rms=None,
 ) -> dict:
     """
-    Виконує інференс моделі, використовуючи сирі дані для фізики 
-    та нормалізовані дані для нейромережі.[cite: 2, 3]
+    Виконує інференс моделі.
+    df_raw  — сирі дані (фізичні розрахунки)
+    scalers — sklearn scalers для нормалізації спостережень
+    obs_rms — RunningMeanStd з VecNormalize (якщо модель навчалась з ним)
     """
 
-    # ── 1. Створюємо нормалізований датасет для моделі ─────────────
-    # Проганяємо кожен рядок сирих даних через скалери
+    # ── 1. Нормалізуємо сирі дані для нейромережі ──────────────────
     df_norm = pd.DataFrame([
         normalize_row(df_raw.iloc[i], scalers)
         for i in range(len(df_raw))
     ])
 
-    # ── 2. Створюємо середовище з ДВОМА датасетами ────────────────
-    # Передаємо df_raw для розрахунків у step()
-    # Передаємо df_norm (як df) для спостережень у get_observe()[cite: 2]
+    # ── 2. Середовище ──────────────────────────────────────────────
     env = Environment(df_raw=df_raw, df=df_norm, system_config=system_config)
 
-    # ── 3. Ініціалізація стану та SoC ─────────────────────────────
+    # ── 3. Початковий стан ─────────────────────────────────────────
     obs, _ = env.reset()
-    # Встановлюємо реальний SoC, отриманий від інвертора/BMS[cite: 3]
     env.soc = float(np.clip(initial_soc, 0.0, 1.0))
-    # Оновлюємо початкове спостереження з урахуванням нового SoC[cite: 2, 3]
-    obs = env.get_observe()   
+    obs = env.get_observe()
 
-    # ── 4. Генерація плану (Step-by-step) ────────────────────────
+    # ── 4. Dispatch plan ───────────────────────────────────────────
     dispatch_plan = []
 
     while True:
-        # Отримуємо дію від моделі (deterministic=True для стабільності)[cite: 3]
-        action, _state = model.predict(obs, deterministic=True)
+        # Застосовуємо obs_rms нормалізацію якщо модель навчалась з VecNormalize
+        if obs_rms is not None:
+            obs_input = np.clip(
+                (obs - obs_rms.mean) / np.sqrt(obs_rms.var + 1e-8),
+                -10.0, 10.0,
+            ).astype(np.float32)
+        else:
+            obs_input = obs
 
-        # Робимо крок у середовищі[cite: 2, 3]
+        action, _ = model.predict(obs_input, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
 
-        # Додаємо результати кроку в план[cite: 3]
         dispatch_plan.append({
             'step':           env.curr_step - 1,
             'action_battery': round(float(action[0]), 4),
@@ -117,8 +125,7 @@ def run_inference(
         if terminated or truncated:
             break
 
-    # ── 5. Формування підсумків ──────────────────────────────────
-    # Розрахунки ведуться на основі реальних фізичних величин із df_raw[cite: 2, 3]
+    # ── 5. Summary ─────────────────────────────────────────────────
     summary = {
         'total_money_earned': round(sum(x['money_earned_ts'] for x in dispatch_plan)),
         'total_reward_uah': round(sum(x['reward'] for x in dispatch_plan), 2),
@@ -132,50 +139,47 @@ def run_inference(
         'steps':            len(dispatch_plan),
     }
 
-    return {
-        'dispatch_plan': dispatch_plan,
-        'summary':       summary,
-    }
- 
- 
+    return {'dispatch_plan': dispatch_plan, 'summary': summary}
+
+
 # ─────────────────────────────────────────────────────────────────────
-# CLI — запуск з командного рядка для тестування
+# CLI
 # ─────────────────────────────────────────────────────────────────────
- 
+
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
-        'capacity_kwh':        2.0,
-        'max_charge_power':    1.0,
-        'max_discharge_power': 1.0,
+        'capacity_kwh':        100.0,
+        'max_charge_power':    100.0,
+        'max_discharge_power': 100.0,
         'efficiency':          0.95,
         'lcos':                1.5,
         'min_reserve':         20,
     },
     'solar': {
-        'peak_power':  3.0,
-        'efficiency':  0.18,
+        'peak_power':  100.0,
+        'efficiency':  0.20,
     },
     'inverter': {
-        'max_power': 5.0,
-        'price_to_buy': 4.32
-    }
+        'max_power':    100.0,
+        'price_to_buy': 4.32,
+    },
 }
- 
- 
+
+
 if __name__ == '__main__':
     import json
- 
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data',    default='dataset_normalized.csv')
-    parser.add_argument('--model',   default='models/sac_ems')
+    parser.add_argument('--data',    default='dataset_final.csv')
+    parser.add_argument('--model',   default='models/best/best_model.zip')
     parser.add_argument('--scalers', default='models/scalers.pkl')
+    parser.add_argument('--obsrms',  default='models/obs_rms.pkl')
     parser.add_argument('--config',  default=None, help='JSON файл з system_config')
     parser.add_argument('--output',  default='results/dispatch_plan.csv')
     parser.add_argument('--soc',     type=float, default=0.5)
     parser.add_argument('--days',    type=int,   default=1)
     args = parser.parse_args()
- 
-    # Завантажуємо конфіг
+
     if args.config:
         with open(args.config) as f:
             system_config = json.load(f)
@@ -183,35 +187,28 @@ if __name__ == '__main__':
     else:
         system_config = DEFAULT_SYSTEM_CONFIG
         print("Конфіг: DEFAULT_SYSTEM_CONFIG")
- 
-    # Завантажуємо модель і scalers
-    model, scalers = load_model_and_scalers(args.model, args.scalers)
- 
-    # Завантажуємо датасет
-    # При запуску з CLI дані вже нормалізовані (dataset_normalized.csv)
-    # тому normalize_row всередині run_inference спрацює як passthrough
-    # для вже нормалізованих колонок
+
+    model, scalers, obs_rms = load_model_and_scalers(args.model, args.scalers, args.obsrms)
+
     df = pd.read_csv(args.data)
     df = df.iloc[:args.days * 96].reset_index(drop=True)
     print(f"Даних: {len(df)} рядків ({args.days} днів)\n")
- 
-    # Запускаємо інференс
+
     result = run_inference(
         df_raw=df,
         system_config=system_config,
         model=model,
         scalers=scalers,
         initial_soc=args.soc,
+        obs_rms=obs_rms,
     )
- 
-    # Виводимо summary
-    print("\n" + "="*50)
+
+    print("\n" + "=" * 50)
     print("ПІДСУМКИ")
-    print("="*50)
+    print("=" * 50)
     for k, v in result['summary'].items():
         print(f"  {k:25s} {v}")
- 
-    # Зберігаємо dispatch plan
+
     os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
     pd.DataFrame(result['dispatch_plan']).to_csv(args.output, index=False)
     print(f"\nDispatch plan → {args.output}")
