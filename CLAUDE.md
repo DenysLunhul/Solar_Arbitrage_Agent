@@ -77,18 +77,30 @@ ds_project_demo/
 ├── backend/
 │   ├── __init__.py
 │   ├── main.py                            # FastAPI app entry point
+│   ├── trained_models/                    # Per-config PPO models saved locally as {config_id}.zip
 │   ├── core/
 │   │   ├── database.py                    # SQLAlchemy engine + session (PostgreSQL)
 │   │   ├── loader.py                      # Bulk-uploads DataFrame → History table
-│   │   └── trainer.py                     # PPO training via SB3; uploads model to MinIO; writes AgentModels status
+│   │   └── trainer.py                     # PPO training via SB3; saves locally; writes AgentModels status
 │   ├── models/
 │   │   └── site.py                        # ORM: User, SystemConfig, History, AgentPredictions, AgentModels
+│   ├── repositories/                      # Data-access layer (DB queries only, no business logic)
+│   │   ├── __init__.py
+│   │   ├── config_repo.py                 # SystemConfig CRUD
+│   │   ├── model_repo.py                  # AgentModels queries
+│   │   ├── prediction_repo.py             # AgentPredictions bulk insert / delete
+│   │   └── user_repo.py                   # User CRUD
 │   ├── routers/
 │   │   ├── auth.py                        # POST /auth/login, POST /auth/register
 │   │   ├── config.py                      # POST /config/ (+ background training), GET /config/, GET /config/list
-│   │   └── predictions.py                 # GET /predictions/ — partial: time gate + data fetch, inference loop missing
+│   │   └── predictions.py                 # GET /predictions/?config_name=… — fully wired ✅
 │   ├── schemas/
-│   │   └── schemas.py                     # Pydantic: SiteConfig, Battery, Inverter, SolarPanel, Grid, User
+│   │   └── schemas.py                     # Pydantic: SiteConfig (with to_env_dict()), Battery, Inverter, SolarPanel, Grid, User
+│   ├── services/                          # Business logic layer (orchestrates repos + external calls)
+│   │   ├── __init__.py
+│   │   ├── auth_service.py                # login / register logic
+│   │   ├── config_service.py              # save / get / list config logic
+│   │   └── prediction_service.py          # full prediction pipeline (data fetch → inference → DB write)
 │   └── security/
 │       └── security.py                    # JWT (HS256), pwdlib Argon2 password hashing
 └── temp/                                  # One-off data-cleaning utility scripts (not part of main pipeline)
