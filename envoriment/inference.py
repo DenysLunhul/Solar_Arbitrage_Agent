@@ -109,17 +109,27 @@ def run_inference(
         obs, reward, terminated, truncated, info = env.step(action)
 
         dispatch_plan.append({
-            'step':           env.curr_step - 1,
-            'action_battery': round(float(action[0]), 4),
-            'action_grid':    round(float(action[1]), 4),
-            'soc':            round(float(info['soc']), 4),
-            'target_soc':     round(float(info['target_soc']), 4),
-            'solar_gen_kwh':  round(float(info['solar_gen_ts_kwh']), 4),
-            'grid_kwh':       round(float(info['actual_grid_kwh']), 4),
-            'unmet_load_kwh': round(float(info['unmet_load_kwh']), 4),
-            'lcos_cost':      round(float(info['lcos_cost']), 4),
-            'money_earned_ts': round(float(info['money_earned_ts'])), 
-            'reward':         round(float(reward), 4),
+            'step':              env.curr_step - 1,
+            'action_battery':    round(float(action[0]), 4),
+            'action_grid':       round(float(action[1]), 4),
+            'soc':               round(float(info['soc']), 4),
+            'target_soc':        round(float(info['target_soc']), 4),
+            'solar_gen_kwh':     round(float(info['solar_gen_ts_kwh']), 4),
+            'solar_surplus_kwh': round(float(info['solar_surplus_kwh']), 4),
+            'battery_kwh':       round(float(info['battery_kwh']), 4),
+            'grid_kwh':          round(float(info['actual_grid_kwh']), 4),
+            'unmet_load_kwh':    round(float(info['unmet_load_kwh']), 4),
+            'lcos_cost':         round(float(info['lcos_cost']), 4),
+            'mismatch':          round(float(info['mismatch']), 4),
+            'money_earned_ts':   round(float(info['money_earned_ts']), 4),
+            'reward':            round(float(reward), 4),
+            'reward_market':     round(float(info['reward_market']), 4),
+            'reward_lcos':       round(float(info['reward_lcos']), 4),
+            'reward_unmet':      round(float(info['reward_unmet']), 4),
+            'reward_mismatch':   round(float(info['reward_mismatch']), 4),
+            'reward_soc_soft':   round(float(info['reward_soc_soft']), 4),
+            'reward_reserve':    round(float(info['reward_reserve']), 4),
+            'reward_preparation':round(float(info['reward_preparation']), 4),
         })
 
         if terminated or truncated:
@@ -148,20 +158,23 @@ def run_inference(
 
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
-        'capacity_kwh':        100.0,
-        'max_charge_power':    100.0,
-        'max_discharge_power': 100.0,
+        'capacity_kwh':        10.0,
+        'max_charge_power':    5.0,   # C/2
+        'max_discharge_power': 5.0,   # C/2
         'efficiency':          0.95,
         'lcos':                1.5,
         'min_reserve':         20,
     },
     'solar': {
-        'peak_power':  100.0,
+        'peak_power':  5.0,
         'efficiency':  0.20,
     },
     'inverter': {
-        'max_power':    100.0,
-        'price_to_buy': 4.32,
+        'max_power': 6.0,
+    },
+    'grid': {
+        'capacity':     10.0,
+        'price_to_buy': 5.5,
     },
 }
 

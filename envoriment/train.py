@@ -22,7 +22,6 @@ import pandas as pd
 import gymnasium as gym
  
 from stable_baselines3 import SAC
-from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import (
     CheckpointCallback,
@@ -49,13 +48,13 @@ CONFIG = {
     'monitor_dir':     'logs/monitor/',
  
     # Навчання
-    'total_timesteps': 500_000,
+    'total_timesteps': 1_000_000,
     'checkpoint_freq': 50_000,
     'log_interval':    1_000,
 
     # SAC гіперпараметри
     'sac_params': {
-        'buffer_size':    100_000,
+        'buffer_size':    500_000,
         'learning_starts': 1_000,
         'batch_size':      256,
         'learning_rate':   3e-4,
@@ -82,28 +81,26 @@ CONFIG = {
 # ─────────────────────────────────────────────────────────────────────
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
-        'capacity_kwh':        5.0,
-        'max_charge_power':    2.5,
-        'max_discharge_power': 2.5,
+        'capacity_kwh':        200.0,
+        'max_charge_power':    100.0,  # C/2
+        'max_discharge_power': 100.0,  # C/2
         'efficiency':          0.95,
         'lcos':                1.5,
-        'min_reserve':         20,    # відсотки (20 = 20%)
+        'min_reserve':         20,
     },
     'solar': {
-        'peak_power':  5.0,
+        'peak_power':  250.0,
         'efficiency':  0.2,
     },
     'inverter': {
-        'max_power': 5.0,
-        'price_to_buy': 10
-    }
+        'max_power': 200.0,
+    },
+    'grid': {
+        'capacity':     250.0,
+        'price_to_buy': 5.5,
+    },
 }
 
-#TODO
-CONFIG_FROM_DB = {
-}
- 
- 
 # ═════════════════════════════════════════════════════════════════════
 # RandomConfigWrapper
 #
@@ -117,38 +114,40 @@ CONFIG_FROM_DB = {
  
 class RandomConfigWrapper(gym.Wrapper):
     def __init__(self, df: pd.DataFrame, df_raw: pd.DataFrame):
-        config = self._sample_config()
-        # ПЕРЕДАЄМО ОБИДВА ДАТАСЕТИ
-        env = Environment(df_raw=df_raw, df=df, system_config=config)
-        super().__init__(env)
         self.df = df
         self.df_raw = df_raw
- 
+        env = Environment(df_raw=df_raw, df=df, system_config=self._sample_config())
+        super().__init__(env)
+
     def _sample_config(self) -> dict:
-        capacity = float(np.random.uniform(5.0, 15.0))
+        capacity      = float(np.random.uniform(50, 500))
+        solar_peak    = float(capacity * np.random.uniform(0.8, 1.5))
+        inverter_max  = float(solar_peak * np.random.uniform(0.8, 1.1))
+        grid_capacity = float(inverter_max * np.random.uniform(1.0, 1.5))
         return {
             'battery': {
                 'capacity_kwh':        capacity,
-                'max_charge_power':    float(np.random.uniform(0.5, min(capacity, 10.0))),
-                'max_discharge_power': float(np.random.uniform(0.5, min(capacity, 10.0))),
+                'max_charge_power':    capacity / 2,
+                'max_discharge_power': capacity / 2,
                 'efficiency':          float(np.random.uniform(0.90, 0.98)),
                 'lcos':                float(np.random.uniform(0.5, 3.0)),
-                'min_reserve':         int(np.random.randint(10, 30)),
+                'min_reserve':         int(np.random.randint(10, 31)),
             },
             'solar': {
-                'peak_power':  float(np.random.uniform(5.0, 15.0)),
+                'peak_power':  solar_peak,
                 'efficiency':  float(np.random.uniform(0.17, 0.23)),
             },
             'inverter': {
-                'max_power': float(np.random.uniform(3.0, 15.0)),
-                'price_to_buy' : 10
+                'max_power': inverter_max,
+            },
+            'grid': {
+                'capacity':     grid_capacity,
+                'price_to_buy': 5.5,
             },
         }
- 
+
     def reset(self, **kwargs):
-        # ОНОВЛЮЄМО: При скиданні теж передаємо обидва DF[cite: 2]
-        new_config = self._sample_config()
-        self.env = Environment(df_raw=self.df_raw, df=self.df, system_config=new_config)
+        self.env = Environment(df_raw=self.df_raw, df=self.df, system_config=self._sample_config())
         return self.env.reset(**kwargs)
  
  
@@ -157,17 +156,23 @@ class RandomConfigWrapper(gym.Wrapper):
 # ═════════════════════════════════════════════════════════════════════
  
 def load_data():
-    # ... (код перевірки існування файлів)
-    df = pd.read_csv(CONFIG['dataset_path'])
+    df     = pd.read_csv(CONFIG['dataset_path'])
     df_raw = pd.read_csv(CONFIG['dataset_raw_path'])
 
-    split_idx = int(len(df) * 0.8)
+    train_idx, eval_idx = [], []
+    for month in range(1, 13):
+        idx = df_raw.index[df_raw['Month'] == month].tolist()
+        split = int(len(idx) * 0.75)   # ~3 weeks train, ~1 week eval
+        train_idx.extend(idx[:split])
+        eval_idx.extend(idx[split:])
 
-    df_train = df.iloc[:split_idx].reset_index(drop=True)
-    df_train_raw = df_raw.iloc[:split_idx].reset_index(drop=True)
-    
-    df_eval = df.iloc[split_idx:].reset_index(drop=True)
-    df_eval_raw = df_raw.iloc[split_idx:].reset_index(drop=True)
+    df_train     = df.iloc[train_idx].reset_index(drop=True)
+    df_train_raw = df_raw.iloc[train_idx].reset_index(drop=True)
+    df_eval      = df.iloc[eval_idx].reset_index(drop=True)
+    df_eval_raw  = df_raw.iloc[eval_idx].reset_index(drop=True)
+
+    print(f"Train: {len(df_train)} rows across all 12 months")
+    print(f"Eval:  {len(df_eval)} rows across all 12 months")
 
     return df_train, df_train_raw, df_eval, df_eval_raw
  
@@ -246,7 +251,7 @@ def make_callbacks(eval_env):
         best_model_save_path=os.path.join('models', 'best'),
         log_path=os.path.join('logs', 'eval'),
         eval_freq=CONFIG['checkpoint_freq'],
-        n_eval_episodes=3,
+        n_eval_episodes=1,
         deterministic=True,
         verbose=1,
     )
@@ -290,26 +295,29 @@ def save_and_test(model, eval_env):
  
     # Один тестовий епізод
     print("\nТестуємо один епізод...")
-    obs, info = eval_env.reset()
+    obs = eval_env.reset()
     total_money_earned = 0.0
     total_reward = 0.0
     total_unmet  = 0.0
     steps        = 0
- 
+    last_info    = {}
+
     while True:
         action, _ = model.predict(obs, deterministic=True)
-        obs, reward, terminated, truncated, info = eval_env.step(action)
-        total_reward += reward
-        total_money_earned += info.get('money_earned_ts', 0.0)
-        total_unmet  += info.get('unmet_load_kwh', 0.0)
-        steps        += 1
-        if terminated or truncated:
+        obs, reward, dones, infos = eval_env.step(action)
+        info = infos[0]
+        total_reward       += float(reward[0])
+        total_money_earned += float(info.get('money_earned_ts', 0.0))
+        total_unmet        += float(info.get('unmet_load_kwh', 0.0))
+        steps += 1
+        last_info = info
+        if dones[0]:
             break
- 
+
     print(f"Кроків:                  {steps}")
-    print(f"Сумарний reward:         {total_reward:.2f} ")
+    print(f"Сумарний reward:         {total_reward:.2f}")
     print(f"Непокрите навантаження:  {total_unmet:.4f} кВт·год")
-    print(f"Фінальний SoC:           {info['soc']:.3f}")
+    print(f"Фінальний SoC:           {last_info.get('soc', 0.0):.3f}")
     print(f"Заробили {total_money_earned:.2f} UAH")
  
  
@@ -318,6 +326,8 @@ def save_and_test(model, eval_env):
 # ═════════════════════════════════════════════════════════════════════
  
 if __name__ == '__main__':
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    np.random.seed(42)
 
     d_train, d_train_raw, d_eval, d_eval_raw = load_data()
 
