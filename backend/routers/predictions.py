@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from backend.core.database import get_db
@@ -9,5 +9,10 @@ router = APIRouter(prefix="/predictions", tags=["predictions"])
 
 
 @router.get("/")
-def get_predictions(config_name: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return prediction_service.get_predictions(db, config_name, user.id)
+def get_predictions(
+    config_name: str,
+    initial_soc: float = Query(default=0.5, ge=0.0, le=1.0),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return prediction_service.get_predictions(db, config_name, user.id, initial_soc)

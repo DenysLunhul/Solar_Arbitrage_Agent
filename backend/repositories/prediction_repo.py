@@ -5,9 +5,9 @@ from sqlalchemy.orm import Session
 from backend.models.site import AgentPredictions
 
 
-def delete_for_date(db: Session, user_id: int, target_date: date) -> None:
+def delete_for_date(db: Session, config_id: int, target_date: date) -> None:
     db.query(AgentPredictions).filter(
-        AgentPredictions.user_id == user_id,
+        AgentPredictions.config_id == config_id,
         AgentPredictions.date == target_date,
     ).delete()
 

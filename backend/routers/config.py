@@ -13,11 +13,20 @@ router = APIRouter(prefix="/config", tags=["config"])
 def save_config(
     config_name: str,
     settings: SiteConfig,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return config_service.save_config(db, config_name, settings, user.id)
+
+
+@router.post("/train")
+def train_config(
+    config_name: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    return config_service.save_config(db, config_name, settings, user.id, background_tasks)
+    return config_service.trigger_training(db, config_name, user.id, background_tasks)
 
 
 @router.get("/", response_model=SystemConfigResponse)

@@ -20,3 +20,13 @@ def create(db: Session, config_name: str, settings: dict, user_id: int) -> Syste
     db.commit()
     db.refresh(config)
     return config
+
+
+def upsert(db: Session, config_name: str, settings: dict, user_id: int) -> SystemConfig:
+    config = get_by_name_and_user(db, config_name, user_id)
+    if config is None:
+        return create(db, config_name, settings, user_id)
+    config.settings = settings
+    db.commit()
+    db.refresh(config)
+    return config

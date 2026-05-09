@@ -33,6 +33,7 @@ class AgentPredictions(Base):
 
     id        = Column(Integer, primary_key=True, index=True)
     user_id   = Column(Integer, ForeignKey("users.id"), index=True)
+    config_id = Column(Integer, ForeignKey("system_configs.id"), index=True)
     date      = Column(Date, index=True)
     step      = Column(Integer)
     timestamp = Column(DateTime, index=True)
@@ -82,6 +83,7 @@ class AgentModels(Base):
     id              = Column(Integer, primary_key=True, index=True)
     config_id       = Column(Integer, ForeignKey("system_configs.id"), index=True)
     status          = Column(String)
+    algorithm       = Column(String, default="PPO")
     trained_at      = Column(DateTime)
     total_timesteps = Column(Integer)
     storage_path    = Column(String)

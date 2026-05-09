@@ -49,7 +49,10 @@ class SiteConfig(BaseModel):
                 'efficiency': self.solar.solar_efficiency,
             },
             'inverter': {
-                'max_power':    self.inverter.max_power,
+                'max_power': self.inverter.max_power,
+            },
+            'grid': {
+                'capacity':     self.grid.grid_capacity,
                 'price_to_buy': self.grid.price_buy_from_grid,
             },
         }

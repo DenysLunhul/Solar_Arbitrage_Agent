@@ -23,7 +23,7 @@ def train_model_for_config(config_id: int):
     try:
         record = db.query(AgentModels).filter(AgentModels.config_id == config_id).first()
         if record is None:
-            record = AgentModels(config_id=config_id, status="training", trained_at=datetime.now())
+            record = AgentModels(config_id=config_id, status="training", algorithm="PPO", trained_at=datetime.now())
             db.add(record)
         else:
             record.status = "training"
