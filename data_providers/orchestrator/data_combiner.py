@@ -14,17 +14,17 @@ from backend.models.site import SystemConfig
 
 def get_solar_parameters(config_id):
     db = SessionLocal()
-    config_record = db.query(SystemConfig).order_by(SystemConfig.id.desc()).first()
+    config_record = db.query(SystemConfig).filter(SystemConfig.id == config_id).first()
     db.close()
 
     if config_record and config_record.settings:
         solar = config_record.settings.get("solar", {})
-        return solar.get("tilt", 35), solar.get("azimuth", 0)
+        return solar.get("solar_tilt", 35), solar.get("solar_azimuth", 0)
 
     return 35, 0
 
 
-def combine(config_id, tilt = None, azimuth = None):
+def combine(config_id, tilt=None, azimuth=None):
     if tilt is None or azimuth is None:
         tilt, azimuth = get_solar_parameters(config_id)
 
@@ -33,8 +33,20 @@ def combine(config_id, tilt = None, azimuth = None):
     grid = fetch_grid(today)
     load = fetch_load(today)
     DAM = fetch_DAM(today)
+    if DAM is None:
+        return None
     weather = fetch_weather(today, tilt, azimuth)
     dataset = pd.concat([time, grid, load, weather, DAM], axis=1)
+
+    for col in ('DAM_Price', 'DAM_Vol_Sale', 'DAM_Vol_Buy'):
+        if col in dataset.columns:
+            dataset[col] = pd.to_numeric(
+                dataset[col].astype(str)
+                .str.replace('\xa0', '', regex=False)
+                .str.replace(' ',    '', regex=False)
+                .str.replace(',',    '.', regex=False),
+                errors='coerce',
+            )
 
     current_year = datetime.now().year
     dataset['timestamp'] = dataset.apply(

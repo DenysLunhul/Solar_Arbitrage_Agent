@@ -16,7 +16,7 @@ def fetch_load(today: date) -> pd.DataFrame:
     ]
     df = pd.DataFrame(rows)
 
-    base = np.where((df["Hour"] >= 8) & (df["Hour"] <= 18), 350.0, 60.0)
+    base = np.where((df["Hour"] >= 8) & (df["Hour"] <= 18), 170.0, 50.0)
     if day_of_week >= 6:
         base = base * 0.4
 

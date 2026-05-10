@@ -27,6 +27,14 @@ def fetch_DAM(today: date) -> pd.DataFrame:
             df = df.drop(columns=DAM_drop_columns)
             df = df.loc[df.index.repeat(4)].reset_index(drop=True)
             df = df.rename(columns=DAM_RENAME)
+            for col in DAM_RENAME.values():
+                df[col] = (
+                    df[col].astype(str)
+                    .str.replace('\xa0', '', regex=False)
+                    .str.replace(' ', '', regex=False)
+                    .str.replace(',', '.', regex=False)
+                    .astype(float)
+                )
             return df
     except Exception:
         return None

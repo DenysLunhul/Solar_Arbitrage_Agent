@@ -162,22 +162,22 @@ def run_inference(
 
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
-        'capacity_kwh':        10.0,
-        'max_charge_power':    5.0,   # C/2
-        'max_discharge_power': 5.0,   # C/2
+        'capacity_kwh':        250.0,
+        'max_charge_power':    150.0,   # C/2
+        'max_discharge_power': 150.0,   # C/2
         'efficiency':          0.95,
         'lcos':                1.5,
         'min_reserve':         20,
     },
     'solar': {
-        'peak_power':  5.0,
+        'peak_power':  250.0,
         'efficiency':  0.20,
     },
     'inverter': {
-        'max_power': 6.0,
+        'max_power': 250.0,
     },
     'grid': {
-        'capacity':     10.0,
+        'capacity':     250.0,
         'price_to_buy': 5.5,
     },
 }
@@ -185,14 +185,18 @@ DEFAULT_SYSTEM_CONFIG = {
 
 if __name__ == '__main__':
     import json
+    from pathlib import Path
+
+    _ROOT    = Path(__file__).resolve().parent.parent
+    _ENV_DIR = _ROOT / 'envoriment'
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data',    default='dataset_final.csv')
-    parser.add_argument('--model',   default='models/best/best_model.zip')
-    parser.add_argument('--scalers', default='models/scalers.pkl')
-    parser.add_argument('--obsrms',  default='models/obs_rms.pkl')
+    parser.add_argument('--data',    default=str(_ROOT / 'data_providers' / 'orchestrator' / 'combined.csv'))
+    parser.add_argument('--model',   default=str(_ENV_DIR / 'models' / 'best' / 'best_model.zip'))
+    parser.add_argument('--scalers', default=str(_ENV_DIR / 'models' / 'scalers.pkl'))
+    parser.add_argument('--obsrms',  default=str(_ENV_DIR / 'models' / 'obs_rms.pkl'))
     parser.add_argument('--config',  default=None, help='JSON файл з system_config')
-    parser.add_argument('--output',  default='results/dispatch_plan.csv')
+    parser.add_argument('--output',  default=str(_ENV_DIR / 'results' / 'dispatch_plan.csv'))
     parser.add_argument('--soc',     type=float, default=0.5)
     parser.add_argument('--days',    type=int,   default=1)
     args = parser.parse_args()
@@ -226,7 +230,8 @@ if __name__ == '__main__':
     for k, v in result['summary'].items():
         print(f"  {k:25s} {v}")
 
-    os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
-    pd.DataFrame(result['dispatch_plan']).to_csv(args.output, index=False)
-    print(f"\nDispatch plan → {args.output}")
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(result['dispatch_plan']).to_csv(output_path, index=False)
+    print(f"\nDispatch plan → {output_path}")
     print(pd.DataFrame(result['dispatch_plan']).head(10).to_string())
