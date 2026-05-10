@@ -42,8 +42,8 @@ class Environment(gym.Env):
         # Площа панелей рахується автоматично з пікової потужності і ККД
         # Формула: P_peak[Вт] = GTI_stc[Вт/м²] × η × Area[м²]
         # GTI_stc = 1000 Вт/м² (стандартні умови)
-        # Звідси: Area = P_peak / (1000 × η)
-        self.panel_area_m2        = (self.solar_peak_power_kw * self.solar_efficiency)
+        # Звідси: Area[м²] = P_peak[кВт] / η   (1000 скорочується)
+        self.panel_area_m2        = self.solar_peak_power_kw / self.solar_efficiency
  
         # ── Початковий стан ───────────────────────────────────────
         self.soc       = 0.0

@@ -121,7 +121,7 @@ class RandomConfigWrapper(gym.Wrapper):
 
     def _sample_config(self) -> dict:
         capacity      = float(np.random.uniform(50, 500))
-        solar_peak    = float(capacity * np.random.uniform(0.8, 1.5))
+        solar_peak    = float(capacity * np.random.uniform(0.8, 2.0))
         inverter_max  = float(solar_peak * np.random.uniform(0.8, 1.1))
         grid_capacity = float(inverter_max * np.random.uniform(1.0, 1.5))
         return {

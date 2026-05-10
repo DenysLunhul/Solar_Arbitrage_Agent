@@ -24,8 +24,12 @@ import pickle
 import numpy as np
 import pandas as pd
 
-from environment import Environment
-from normalize import normalize_row
+try:
+    from environment import Environment
+    from normalize import normalize_row
+except ImportError:
+    from envoriment.environment import Environment
+    from envoriment.normalize import normalize_row
 
 
 def load_model_and_scalers(
