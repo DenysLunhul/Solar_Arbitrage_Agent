@@ -28,7 +28,7 @@ from stable_baselines3.common.callbacks import (
     EvalCallback,
     CallbackList,
 )
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
  
 from environment import Environment
  
@@ -50,7 +50,8 @@ CONFIG = {
     # Навчання
     'total_timesteps': 1_000_000,
     'checkpoint_freq': 50_000,
-    'log_interval':    1_000,
+    'log_interval':    1,      # SAC counts episodes not steps — log after every episode
+    'n_envs':          4,   # parallel envs — set to CPU core count (max 8)
 
     # SAC гіперпараметри
     'sac_params': {
@@ -97,7 +98,7 @@ DEFAULT_SYSTEM_CONFIG = {
     },
     'grid': {
         'capacity':     250.0,
-        'price_to_buy': 5.5,
+        'price_to_buy': 0.0,  # unused — buy_price computed dynamically as DAM + 3
     },
 }
 
@@ -142,7 +143,7 @@ class RandomConfigWrapper(gym.Wrapper):
             },
             'grid': {
                 'capacity':     grid_capacity,
-                'price_to_buy': 5.5,
+                'price_to_buy': 0.0,  # unused — buy_price computed dynamically as DAM + 3
             },
         }
 
@@ -184,13 +185,17 @@ def load_data():
 def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
     os.makedirs(CONFIG['monitor_dir'], exist_ok=True)
 
-    # Передаємо ПАРУ датасетів у обгортки[cite: 2, 4]
-    train_env = DummyVecEnv([
-        lambda: Monitor(
-            RandomConfigWrapper(df_train, df_train_raw),
-            filename=os.path.join(CONFIG['monitor_dir'], 'train')
-        )
-    ])
+    n = CONFIG['n_envs']
+    def make_train_env(i):
+        def _init():
+            return Monitor(
+                RandomConfigWrapper(df_train, df_train_raw),
+                filename=os.path.join(CONFIG['monitor_dir'], f'train_{i}')
+            )
+        return _init
+
+    # SubprocVecEnv parallelises env stepping across CPU cores (main speedup for MLP policies)
+    train_env = SubprocVecEnv([make_train_env(i) for i in range(n)])
 
     eval_env = DummyVecEnv([
         lambda: Monitor(
@@ -251,7 +256,7 @@ def make_callbacks(eval_env):
         best_model_save_path=os.path.join('models', 'best'),
         log_path=os.path.join('logs', 'eval'),
         eval_freq=CONFIG['checkpoint_freq'],
-        n_eval_episodes=1,
+        n_eval_episodes=5,
         deterministic=True,
         verbose=1,
     )

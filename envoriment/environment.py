@@ -110,9 +110,10 @@ class Environment(gym.Env):
         row = self.df_raw.iloc[self.curr_step]
  
         # ── Дані поточного таймстепу ──────────────────────────────
-        curr_price         = row['DAM_Price'] / 1000
-        curr_load_ts       = row['Load'] / 1000 / 4
-        curr_load_kw       = row['Load'] / 1000
+        curr_price         = row['DAM_Price'] / 1000   # UAH/kWh (sell price = DAM)
+        buy_price          = curr_price + 3.0           # UAH/kWh (DAM + 3 UAH/kWh grid tax)
+        curr_load_ts       = row['Load'] / 4    # kW → kWh per 15-min timestep
+        curr_load_kw       = row['Load']        # already in kW
         grid_status        = int(row['Grid'])
         gti                = row['Global_tilted_irradiance_instant']
         hours_until_outage = row['hours_until_outage']
@@ -214,17 +215,18 @@ class Environment(gym.Env):
         r_soc_soft    = 0.0
         r_reserve     = 0.0
         r_preparation = 0.0
+        r_soc_target  = 0.0
 
         # 5.1 Ринковий P&L
         if actual_grid_ts > 0:
-            r_market = -actual_grid_ts * self.price_to_buy
+            r_market = -actual_grid_ts * buy_price
         else:
             r_market = abs(actual_grid_ts) * curr_price
 
         if actual_grid_ts < 0:
-            money_earned_ts = abs(actual_grid_ts * curr_price)
+            money_earned_ts = abs(actual_grid_ts) * curr_price   # revenue from selling
         else:
-            money_earned_ts = actual_grid_ts * self.price_to_buy
+            money_earned_ts = -actual_grid_ts * buy_price         # cost of buying (negative)
 
         # 5.2 Деградація батареї
         lcos_cost = self.lcos * actual_batt_energy_abs
@@ -232,17 +234,19 @@ class Environment(gym.Env):
 
         # 5.3 Непокрите навантаження
         if unmet_load > 0:
-            r_unmet = -unmet_load * self.price_to_buy * 2
+            r_unmet = -unmet_load * buy_price * 2
 
         # 5.4 Штраф за нереалістичну дію
         mismatch   = abs(grid_power_ts - actual_grid_ts)
         r_mismatch = -2.0 * mismatch
 
-        # 5.5 М'який штраф за SoC поза діапазоном 20%–80%
+        # 5.5 Штраф за SoC поза діапазоном [soc_soft_min, soc_soft_max]
+        # Coefficient 30.0 (was 3.0) — makes the penalty competitive with market signals.
+        # At SoC=0: penalty = -30 * 0.04 = -1.2 per step (vs old -0.12).
         if self.soc < self.soc_soft_min:
-            r_soc_soft -= 3.0 * ((self.soc_soft_min - self.soc) ** 2)
+            r_soc_soft -= 30.0 * ((self.soc_soft_min - self.soc) ** 2)
         if self.soc > self.soc_soft_max:
-            r_soc_soft -= 3.0 * ((self.soc - self.soc_soft_max) ** 2)
+            r_soc_soft -= 30.0 * ((self.soc - self.soc_soft_max) ** 2)
 
         # 5.6 Штраф за недостатній резерв під час відключення
         if grid_status == 0 and outage_remaining_h > 0:
@@ -256,15 +260,25 @@ class Environment(gym.Env):
             soc_ready     = min(self.soc, target_soc)
             r_preparation = 5.0 * urgency * soc_ready
 
-        reward = r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation
+        # 5.8 Reward for charging toward target_soc when below it.
+        # Teaches the agent to proactively build the reserve (from solar or cheap grid).
+        # Only fires when charging actually happened (battery_energy_delta > 0).
+        if battery_energy_delta > 0 and self.soc < target_soc:
+            soc_progress  = actual_chem_in / self.max_batt_capacity   # fraction filled this step
+            r_soc_target  = 10.0 * soc_progress
+
+        reward = r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target
 
         # ════════════════════════════════════════════════════════
         # ЗАВЕРШЕННЯ
         # ════════════════════════════════════════════════════════
         self.curr_step += 1
-        terminated  = self.curr_step >= len(self.df) - 1
+        terminated  = self.curr_step >= len(self.df)
         truncated   = False
-        observation = self.get_observe()
+        # On terminal step curr_step == len(df) which is out of bounds.
+        # SB3 discards this obs anyway (calls reset() right after), so return last valid row.
+        obs_idx     = min(self.curr_step, len(self.df) - 1)
+        observation = np.append(self.df.iloc[obs_idx].values, self.soc).astype(np.float32)
 
         info = {
             'soc':               self.soc,
@@ -285,6 +299,7 @@ class Environment(gym.Env):
             'reward_soc_soft':   r_soc_soft,
             'reward_reserve':    r_reserve,
             'reward_preparation':r_preparation,
+            'reward_soc_target': r_soc_target,
         }
 
         return observation, reward, terminated, truncated, info
