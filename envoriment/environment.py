@@ -100,7 +100,7 @@ class Environment(gym.Env):
     # ─────────────────────────────────────────────────────────────
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.soc       = 0.0
+        self.soc       = float(np.random.uniform(0.0, 1.0))
         self.curr_step = 0
         return self.get_observe(), {}
  
@@ -236,17 +236,23 @@ class Environment(gym.Env):
         if unmet_load > 0:
             r_unmet = -unmet_load * buy_price * 2
 
-        # 5.4 Штраф за нереалістичну дію
-        mismatch   = abs(grid_power_ts - actual_grid_ts)
-        r_mismatch = -2.0 * mismatch
+        # 5.4 Mismatch penalty — only when the agent actually controlled the grid outcome.
+        # When net_demand_after_batt > 0 the environment forces actual_grid to cover load
+        # regardless of grid_action, so penalising the difference is not a trainable signal.
+        if grid_status == 1 and net_demand_after_batt < 1e-6:
+            mismatch   = abs(grid_power_ts - actual_grid_ts)
+            r_mismatch = -2.0 * mismatch
+        else:
+            mismatch   = 0.0
+            r_mismatch = 0.0
 
         # 5.5 Штраф за SoC поза діапазоном [soc_soft_min, soc_soft_max]
-        # Coefficient 30.0 (was 3.0) — makes the penalty competitive with market signals.
-        # At SoC=0: penalty = -30 * 0.04 = -1.2 per step (vs old -0.12).
+        # Coefficient 50.0 (was 30) — at SoC=0: -50*0.04 = -2.0/step; over 90 steps ≈ 125 UAH,
+        # which exceeds LCOS for one charge cycle, giving a clear incentive to recharge.
         if self.soc < self.soc_soft_min:
-            r_soc_soft -= 30.0 * ((self.soc_soft_min - self.soc) ** 2)
+            r_soc_soft -= 50.0 * ((self.soc_soft_min - self.soc) ** 2)
         if self.soc > self.soc_soft_max:
-            r_soc_soft -= 30.0 * ((self.soc - self.soc_soft_max) ** 2)
+            r_soc_soft -= 50.0 * ((self.soc - self.soc_soft_max) ** 2)
 
         # 5.6 Штраф за недостатній резерв під час відключення
         if grid_status == 0 and outage_remaining_h > 0:
@@ -260,12 +266,13 @@ class Environment(gym.Env):
             soc_ready     = min(self.soc, target_soc)
             r_preparation = 5.0 * urgency * soc_ready
 
-        # 5.8 Reward for charging toward target_soc when below it.
-        # Teaches the agent to proactively build the reserve (from solar or cheap grid).
-        # Only fires when charging actually happened (battery_energy_delta > 0).
+        # 5.8 LCOS refund when charging toward target_soc.
+        # Old coefficient (10.0 × soc_progress) was 37× smaller than the LCOS cost, so the
+        # agent always avoided charging.  Refunding the exact LCOS cost makes building the
+        # required reserve LCOS-neutral: the agent pays only the grid buy-price (if any) and
+        # the signal is naturally scale-invariant across different battery/LCOS configs.
         if battery_energy_delta > 0 and self.soc < target_soc:
-            soc_progress  = actual_chem_in / self.max_batt_capacity   # fraction filled this step
-            r_soc_target  = 10.0 * soc_progress
+            r_soc_target = lcos_cost   # cancel LCOS while filling reserve
 
         reward = r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target
 

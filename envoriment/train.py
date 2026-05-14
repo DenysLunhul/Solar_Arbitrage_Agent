@@ -15,13 +15,15 @@ train.py
     logs/tensorboard/            — графіки для tensorboard
 """
  
+import copy
 import os
 import pickle
 import numpy as np
 import pandas as pd
 import gymnasium as gym
- 
+
 from stable_baselines3 import SAC
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import (
     CheckpointCallback,
@@ -46,7 +48,7 @@ CONFIG = {
     'checkpoint_dir':  'models/checkpoints/',
     'tensorboard_dir': 'logs/tensorboard/',
     'monitor_dir':     'logs/monitor/',
- 
+
     # Навчання
     'total_timesteps': 1_000_000,
     'checkpoint_freq': 50_000,
@@ -241,18 +243,36 @@ def make_model(train_env):
 # ═════════════════════════════════════════════════════════════════════
 # КРОК 4: Callbacks
 # ═════════════════════════════════════════════════════════════════════
- 
-def make_callbacks(eval_env):
- 
+
+class SyncNormalizeEvalCallback(EvalCallback):
+    """EvalCallback that copies obs_rms from train_env → eval_env before each evaluation.
+
+    Without this, train and eval VecNormalize instances diverge over time, making
+    the Q-function evaluate against a different observation distribution than it was
+    trained on.  The copy is shallow-cloned so train_env continues updating its own stats.
+    """
+    def __init__(self, train_env: VecNormalize, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._train_env = train_env
+
+    def _on_step(self) -> bool:
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            self.eval_env.obs_rms = copy.deepcopy(self._train_env.obs_rms)
+        return super()._on_step()
+
+
+def make_callbacks(train_env, eval_env):
+
     checkpoint_cb = CheckpointCallback(
         save_freq=CONFIG['checkpoint_freq'],
         save_path=CONFIG['checkpoint_dir'],
         name_prefix='sac_ems',
         verbose=1,
     )
- 
-    eval_cb = EvalCallback(
-        eval_env,
+
+    eval_cb = SyncNormalizeEvalCallback(
+        train_env=train_env,
+        eval_env=eval_env,
         best_model_save_path=os.path.join('models', 'best'),
         log_path=os.path.join('logs', 'eval'),
         eval_freq=CONFIG['checkpoint_freq'],
@@ -260,7 +280,7 @@ def make_callbacks(eval_env):
         deterministic=True,
         verbose=1,
     )
- 
+
     return CallbackList([checkpoint_cb, eval_cb])
  
  
@@ -339,7 +359,7 @@ if __name__ == '__main__':
     train_env, eval_env = make_envs(d_train, d_train_raw, d_eval, d_eval_raw)
     
     model = make_model(train_env)
-    callbacks = make_callbacks(eval_env)
+    callbacks = make_callbacks(train_env, eval_env)
     model = train(model, callbacks)
 
     obs_rms_path = 'models/obs_rms.pkl'
