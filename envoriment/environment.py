@@ -162,7 +162,11 @@ class Environment(gym.Env):
         else:
             # РОЗРЯД
             energy_to_draw = abs(battery_energy_delta)
-            max_drawable   = self.soc * self.max_batt_capacity
+            # Hard floor: when grid is up, BMS protects the minimum reserve
+            if grid_status == 1:
+                max_drawable = max(0.0, (self.soc - self.soc_soft_min) * self.max_batt_capacity)
+            else:
+                max_drawable = self.soc * self.max_batt_capacity
             actual_draw    = min(energy_to_draw, max_drawable)
             batt_output_ts = actual_draw * self.batt_efficiency
  
@@ -266,15 +270,27 @@ class Environment(gym.Env):
             soc_ready     = min(self.soc, target_soc)
             r_preparation = 5.0 * urgency * soc_ready
 
-        # 5.8 LCOS refund when charging toward target_soc.
-        # Old coefficient (10.0 × soc_progress) was 37× smaller than the LCOS cost, so the
-        # agent always avoided charging.  Refunding the exact LCOS cost makes building the
-        # required reserve LCOS-neutral: the agent pays only the grid buy-price (if any) and
-        # the signal is naturally scale-invariant across different battery/LCOS configs.
-        if battery_energy_delta > 0 and self.soc < target_soc:
-            r_soc_target = lcos_cost   # cancel LCOS while filling reserve
+        # 5.8 Reward for charging toward target_soc.
+        # Reward = energy stored × buy_price (avoided future purchase cost).
+        # This makes charging economically competitive with selling solar surplus.
+        # Check PRE-charge SoC to handle large actions that overshoot target in one step.
+        if battery_energy_delta > 0:
+            pre_charge_soc = self.soc - actual_chem_in / self.max_batt_capacity
+            if pre_charge_soc < target_soc:
+                r_soc_target = actual_chem_in * buy_price  # economic value of stored reserve
 
-        reward = r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target
+        # 5.9 Wasted-discharge penalty.
+        # When battery output exceeds what load + possible solar export can absorb, the excess
+        # energy evaporates (clamped by max(0, demand - batt_output) in Block 3) but LCOS is
+        # still paid.  Removing the old mismatch penalty stripped the only indirect pressure
+        # against over-discharge, so we replace it with a direct, intentional signal.
+        r_waste = 0.0
+        if battery_energy_delta < 0 and batt_contribution_ts > 0:
+            absorbed  = residual_demand_ts + solar_export_possible
+            wasted    = max(0.0, batt_contribution_ts - absorbed)
+            r_waste   = -2.0 * self.lcos * wasted   # 2× LCOS rate on energy that served nothing
+
+        reward = r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste
 
         # ════════════════════════════════════════════════════════
         # ЗАВЕРШЕННЯ
@@ -307,6 +323,7 @@ class Environment(gym.Env):
             'reward_reserve':    r_reserve,
             'reward_preparation':r_preparation,
             'reward_soc_target': r_soc_target,
+            'reward_waste':      r_waste,
         }
 
         return observation, reward, terminated, truncated, info

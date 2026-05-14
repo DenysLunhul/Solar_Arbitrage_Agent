@@ -50,14 +50,15 @@ CONFIG = {
     'monitor_dir':     'logs/monitor/',
 
     # Навчання
-    'total_timesteps': 1_000_000,
+    'total_timesteps': 2_000_000,
     'checkpoint_freq': 50_000,
     'log_interval':    1,      # SAC counts episodes not steps — log after every episode
-    'n_envs':          4,   # parallel envs — set to CPU core count (max 8)
+    'n_envs':          16,  # 16 workers × ~1.1 ms collection + ~4 ms GPU update ≈ 3 000 steps/sec
 
     # SAC гіперпараметри
     'sac_params': {
-        'buffer_size':    500_000,
+        'device':         'cuda',
+        'buffer_size':    1_000_000,
         'learning_starts': 1_000,
         'batch_size':      256,
         'learning_rate':   3e-4,
@@ -262,9 +263,13 @@ class SyncNormalizeEvalCallback(EvalCallback):
 
 
 def make_callbacks(train_env, eval_env):
+    # SB3 callback freq counts _on_step() calls, not env steps.
+    # With VecEnv each call covers n_envs steps, so divide to keep
+    # checkpoints at the intended absolute step count.
+    freq = max(CONFIG['checkpoint_freq'] // CONFIG['n_envs'], 1)
 
     checkpoint_cb = CheckpointCallback(
-        save_freq=CONFIG['checkpoint_freq'],
+        save_freq=freq,
         save_path=CONFIG['checkpoint_dir'],
         name_prefix='sac_ems',
         verbose=1,
@@ -275,7 +280,7 @@ def make_callbacks(train_env, eval_env):
         eval_env=eval_env,
         best_model_save_path=os.path.join('models', 'best'),
         log_path=os.path.join('logs', 'eval'),
-        eval_freq=CONFIG['checkpoint_freq'],
+        eval_freq=freq,
         n_eval_episodes=5,
         deterministic=True,
         verbose=1,

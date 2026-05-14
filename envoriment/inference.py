@@ -135,6 +135,7 @@ def run_inference(
             'reward_reserve':    round(float(info['reward_reserve']), 4),
             'reward_preparation':round(float(info['reward_preparation']), 4),
             'reward_soc_target': round(float(info['reward_soc_target']), 4),
+            'reward_waste':      round(float(info['reward_waste']), 4),
         })
 
         if terminated or truncated:
