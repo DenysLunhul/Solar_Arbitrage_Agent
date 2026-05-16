@@ -1,23 +1,4 @@
 
-"""
-inference.py
-============
-Запуск навченої моделі для отримання dispatch plan.
-
-Використання з беку (FastAPI):
-    from envoriment.inference import load_model_and_scalers, run_inference
-    model, scalers, obs_rms = load_model_and_scalers(...)
-    result = run_inference(df_raw, system_config, model, scalers, obs_rms=obs_rms)
-
-Використання з командного рядка:
-    python inference.py --data  dataset_final.csv
-                        --model models/best/best_model.zip
-                        --scalers models/scalers.pkl
-                        --obsrms models/obs_rms.pkl
-                        --soc 0.6
-                        --days 1
-"""
-
 import os
 import argparse
 import pickle
@@ -38,32 +19,27 @@ def load_model_and_scalers(
     obs_rms_path: str = None,
     model_cls=None,
 ):
-    """
-    Завантажує модель, scalers і obs_rms.
-    Викликати один раз при старті — результати зберегти глобально.
-
-    model_cls: SAC (default) або PPO — вказати явно якщо потрібно PPO.
-    """
+    """Load model, scalers and obs_rms. Call once at startup and cache the result."""
     if model_cls is None:
         from stable_baselines3 import SAC
         model_cls = SAC
 
-    print(f"Завантажуємо модель:  {model_path}")
+    print(f"Loading model:   {model_path}")
     model = model_cls.load(model_path)
 
-    print(f"Завантажуємо scalers: {scalers_path}")
+    print(f"Loading scalers: {scalers_path}")
     with open(scalers_path, 'rb') as f:
         scalers = pickle.load(f)
 
     obs_rms = None
     if obs_rms_path and os.path.exists(obs_rms_path):
-        print(f"Завантажуємо obs_rms: {obs_rms_path}")
+        print(f"Loading obs_rms: {obs_rms_path}")
         with open(obs_rms_path, 'rb') as f:
             obs_rms = pickle.load(f)
     else:
-        print("obs_rms не знайдено — нормалізація спостережень вимкнена")
+        print("obs_rms not found — observation normalisation disabled")
 
-    print("Готово.\n")
+    print("Done.\n")
     return model, scalers, obs_rms
 
 
@@ -75,32 +51,23 @@ def run_inference(
     initial_soc:   float = 0.5,
     obs_rms=None,
 ) -> dict:
-    """
-    Виконує інференс моделі.
-    df_raw  — сирі дані (фізичні розрахунки)
-    scalers — sklearn scalers для нормалізації спостережень
-    obs_rms — RunningMeanStd з VecNormalize (якщо модель навчалась з ним)
-    """
+    """Run the trained model on df_raw and return dispatch_plan + summary."""
 
-    # ── 1. Нормалізуємо сирі дані для нейромережі ──────────────────
     df_norm = pd.DataFrame([
         normalize_row(df_raw.iloc[i], scalers)
         for i in range(len(df_raw))
     ])
 
-    # ── 2. Середовище ──────────────────────────────────────────────
     env = Environment(df_raw=df_raw, df=df_norm, system_config=system_config)
 
-    # ── 3. Початковий стан ─────────────────────────────────────────
     obs, _ = env.reset()
     env.soc = float(np.clip(initial_soc, 0.0, 1.0))
     obs = env.get_observe()
 
-    # ── 4. Dispatch plan ───────────────────────────────────────────
     dispatch_plan = []
 
     while True:
-        # Застосовуємо obs_rms нормалізацію якщо модель навчалась з VecNormalize
+        # Apply VecNormalize obs_rms transform if model was trained with it
         if obs_rms is not None:
             obs_input = np.clip(
                 (obs - obs_rms.mean) / np.sqrt(obs_rms.var + 1e-8),
@@ -141,7 +108,6 @@ def run_inference(
         if terminated or truncated:
             break
 
-    # ── 5. Summary ─────────────────────────────────────────────────
     summary = {
         'total_money_earned': round(sum(x['money_earned_ts'] for x in dispatch_plan)),
         'total_reward_uah': round(sum(x['reward'] for x in dispatch_plan), 2),
@@ -158,15 +124,11 @@ def run_inference(
     return {'dispatch_plan': dispatch_plan, 'summary': summary}
 
 
-# ─────────────────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────────────────
-
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
         'capacity_kwh':        250.0,
-        'max_charge_power':    150.0,   # C/2
-        'max_discharge_power': 150.0,   # C/2
+        'max_charge_power':    150.0,  # C/2
+        'max_discharge_power': 150.0,  # C/2
         'efficiency':          0.95,
         'lcos':                1.5,
         'min_reserve':         20,
@@ -197,7 +159,7 @@ if __name__ == '__main__':
     parser.add_argument('--model',   default=str(_ENV_DIR / 'models' / 'best' / 'best_model.zip'))
     parser.add_argument('--scalers', default=str(_ENV_DIR / 'models' / 'scalers.pkl'))
     parser.add_argument('--obsrms',  default=str(_ENV_DIR / 'models' / 'obs_rms.pkl'))
-    parser.add_argument('--config',  default=None, help='JSON файл з system_config')
+    parser.add_argument('--config',  default=None, help='JSON file with system_config')
     parser.add_argument('--output',  default=str(_ENV_DIR / 'results' / 'dispatch_plan.csv'))
     parser.add_argument('--soc',     type=float, default=0.5)
     parser.add_argument('--days',    type=int,   default=1)
@@ -206,16 +168,16 @@ if __name__ == '__main__':
     if args.config:
         with open(args.config) as f:
             system_config = json.load(f)
-        print(f"Конфіг: {args.config}")
+        print(f"Config: {args.config}")
     else:
         system_config = DEFAULT_SYSTEM_CONFIG
-        print("Конфіг: DEFAULT_SYSTEM_CONFIG")
+        print("Config: DEFAULT_SYSTEM_CONFIG")
 
     model, scalers, obs_rms = load_model_and_scalers(args.model, args.scalers, args.obsrms)
 
     df = pd.read_csv(args.data)
     df = df.iloc[:args.days * 96].reset_index(drop=True)
-    print(f"Даних: {len(df)} рядків ({args.days} днів)\n")
+    print(f"Data: {len(df)} rows ({args.days} days)\n")
 
     result = run_inference(
         df_raw=df,
@@ -227,7 +189,7 @@ if __name__ == '__main__':
     )
 
     print("\n" + "=" * 50)
-    print("ПІДСУМКИ")
+    print("SUMMARY")
     print("=" * 50)
     for k, v in result['summary'].items():
         print(f"  {k:25s} {v}")

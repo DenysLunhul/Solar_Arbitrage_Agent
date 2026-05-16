@@ -1,20 +1,4 @@
 
-"""
-train.py
-========
-Навчання SAC-агента через Stable-Baselines3.
- 
-Запуск:
-    python train.py
- 
-Що буде створено:
-    models/scalers.pkl           — якщо ще не існує, запустить normalize.py
-    models/sac_ems.zip           — фінальна модель
-    models/best/best_model.zip   — найкраща модель за eval reward
-    models/checkpoints/          — проміжні збереження
-    logs/tensorboard/            — графіки для tensorboard
-"""
- 
 import copy
 import os
 import pickle
@@ -31,16 +15,11 @@ from stable_baselines3.common.callbacks import (
     CallbackList,
 )
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
- 
+
 from environment import Environment
- 
- 
-# ═════════════════════════════════════════════════════════════════════
-# КОНФІГ НАВЧАННЯ
-# ═════════════════════════════════════════════════════════════════════
- 
+
+
 CONFIG = {
-    # Шляхи
     'dataset_path':    'dataset_normalized.csv',
     'dataset_raw_path': 'dataset_final.csv',
     'scalers_path':    'models/scalers.pkl',
@@ -49,13 +28,11 @@ CONFIG = {
     'tensorboard_dir': 'logs/tensorboard/',
     'monitor_dir':     'logs/monitor/',
 
-    # Навчання
     'total_timesteps': 2_000_000,
     'checkpoint_freq': 50_000,
     'log_interval':    1,      # SAC counts episodes not steps — log after every episode
-    'n_envs':          16,  # 16 workers × ~1.1 ms collection + ~4 ms GPU update ≈ 3 000 steps/sec
+    'n_envs':          16,     # 16 workers × ~1.1 ms collection + ~4 ms GPU update ≈ 3 000 steps/sec
 
-    # SAC гіперпараметри
     'sac_params': {
         'device':         'cuda',
         'buffer_size':    1_000_000,
@@ -74,15 +51,7 @@ CONFIG = {
         'use_sde':        False,
     }
 }
- 
-# ─────────────────────────────────────────────────────────────────────
-# DEFAULT конфіг системи для навчання
-#
-# Якщо хочеш одну модель для всіх клієнтів — використовуй
-# RandomConfigWrapper (нижче) щоб навчати на різних конфігах.
-# Якщо хочеш модель для конкретного заліза — виставь тут реальні
-# параметри і вимкни RandomConfigWrapper в make_envs().
-# ─────────────────────────────────────────────────────────────────────
+
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
         'capacity_kwh':        200.0,
@@ -105,17 +74,9 @@ DEFAULT_SYSTEM_CONFIG = {
     },
 }
 
-# ═════════════════════════════════════════════════════════════════════
-# RandomConfigWrapper
-#
-# При кожному reset() генерує новий рандомний конфіг системи.
-# Завдяки цьому модель вчиться бути універсальною — вона бачить
-# різні батареї і панелі і вчиться приймати правильні рішення
-# незалежно від розміру заліза конкретного клієнта.
-#
-# Це називається domain randomization.
-# ═════════════════════════════════════════════════════════════════════
- 
+
+# Domain randomization: each reset() samples a new hardware config so the model
+# learns to operate correctly across diverse battery/solar/inverter/grid sizes.
 class RandomConfigWrapper(gym.Wrapper):
     def __init__(self, df: pd.DataFrame, df_raw: pd.DataFrame):
         self.df = df
@@ -153,12 +114,8 @@ class RandomConfigWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         self.env = Environment(df_raw=self.df_raw, df=self.df, system_config=self._sample_config())
         return self.env.reset(**kwargs)
- 
- 
-# ═════════════════════════════════════════════════════════════════════
-# КРОК 1: Дані
-# ═════════════════════════════════════════════════════════════════════
- 
+
+
 def load_data():
     df     = pd.read_csv(CONFIG['dataset_path'])
     df_raw = pd.read_csv(CONFIG['dataset_raw_path'])
@@ -166,7 +123,7 @@ def load_data():
     train_idx, eval_idx = [], []
     for month in range(1, 13):
         idx = df_raw.index[df_raw['Month'] == month].tolist()
-        split = int(len(idx) * 0.75)   # ~3 weeks train, ~1 week eval
+        split = int(len(idx) * 0.75)   # ~3 weeks train, ~1 week eval per month
         train_idx.extend(idx[:split])
         eval_idx.extend(idx[split:])
 
@@ -179,12 +136,8 @@ def load_data():
     print(f"Eval:  {len(df_eval)} rows across all 12 months")
 
     return df_train, df_train_raw, df_eval, df_eval_raw
- 
- 
-# ═════════════════════════════════════════════════════════════════════
-# КРОК 2: Середовища
-# ═════════════════════════════════════════════════════════════════════
- 
+
+
 def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
     os.makedirs(CONFIG['monitor_dir'], exist_ok=True)
 
@@ -207,50 +160,41 @@ def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
         )
     ])
 
-    # ... (VecNormalize залишається без змін)
     train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     return train_env, eval_env
- 
- 
-# ═════════════════════════════════════════════════════════════════════
-# КРОК 3: Модель
-# ═════════════════════════════════════════════════════════════════════
- 
+
+
 def make_model(train_env):
     print("\n" + "="*60)
-    print("КРОК 3: Ініціалізація SAC")
+    print("Initializing SAC")
     print("="*60)
- 
+
     os.makedirs('models', exist_ok=True)
     os.makedirs(CONFIG['tensorboard_dir'], exist_ok=True)
     os.makedirs(CONFIG['checkpoint_dir'], exist_ok=True)
- 
+
     model = SAC(
         policy='MlpPolicy',
         env=train_env,
         tensorboard_log=CONFIG['tensorboard_dir'],
         **CONFIG['sac_params']
     )
- 
+
     total_params = sum(p.numel() for p in model.policy.parameters())
-    print(f"Параметрів в policy: {total_params:,}")
-    print(f"Архітектура: {CONFIG['sac_params']['policy_kwargs']['net_arch']}")
- 
+    print(f"Policy parameters: {total_params:,}")
+    print(f"Architecture: {CONFIG['sac_params']['policy_kwargs']['net_arch']}")
+
     return model
- 
- 
-# ═════════════════════════════════════════════════════════════════════
-# КРОК 4: Callbacks
-# ═════════════════════════════════════════════════════════════════════
+
 
 class SyncNormalizeEvalCallback(EvalCallback):
     """EvalCallback that copies obs_rms from train_env → eval_env before each evaluation.
 
     Without this, train and eval VecNormalize instances diverge over time, making
     the Q-function evaluate against a different observation distribution than it was
-    trained on.  The copy is shallow-cloned so train_env continues updating its own stats.
+    trained on. The copy is shallow-cloned so train_env continues updating its own stats.
     """
     def __init__(self, train_env: VecNormalize, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -287,19 +231,15 @@ def make_callbacks(train_env, eval_env):
     )
 
     return CallbackList([checkpoint_cb, eval_cb])
- 
- 
-# ═════════════════════════════════════════════════════════════════════
-# КРОК 5: Навчання
-# ═════════════════════════════════════════════════════════════════════
- 
+
+
 def train(model, callbacks):
     print("\n" + "="*60)
-    print("КРОК 4: Навчання")
-    print(f"Кроків: {CONFIG['total_timesteps']:,}")
+    print("Training")
+    print(f"Steps: {CONFIG['total_timesteps']:,}")
     print("Tensorboard: tensorboard --logdir logs/tensorboard/")
     print("="*60 + "\n")
- 
+
     model.learn(
         total_timesteps=CONFIG['total_timesteps'],
         callback=callbacks,
@@ -307,24 +247,19 @@ def train(model, callbacks):
         progress_bar=True,
         reset_num_timesteps=True,
     )
- 
+
     return model
- 
- 
-# ═════════════════════════════════════════════════════════════════════
-# КРОК 6: Збереження і швидкий тест
-# ═════════════════════════════════════════════════════════════════════
- 
+
+
 def save_and_test(model, eval_env):
     print("\n" + "="*60)
-    print("КРОК 5: Збереження і тест")
+    print("Saving and testing")
     print("="*60)
- 
+
     model.save(CONFIG['model_save_path'])
-    print(f"Модель → {CONFIG['model_save_path']}.zip")
- 
-    # Один тестовий епізод
-    print("\nТестуємо один епізод...")
+    print(f"Model → {CONFIG['model_save_path']}.zip")
+
+    print("\nRunning one test episode...")
     obs = eval_env.reset()
     total_money_earned = 0.0
     total_reward = 0.0
@@ -344,17 +279,13 @@ def save_and_test(model, eval_env):
         if dones[0]:
             break
 
-    print(f"Кроків:                  {steps}")
-    print(f"Сумарний reward:         {total_reward:.2f}")
-    print(f"Непокрите навантаження:  {total_unmet:.4f} кВт·год")
-    print(f"Фінальний SoC:           {last_info.get('soc', 0.0):.3f}")
-    print(f"Заробили {total_money_earned:.2f} UAH")
- 
- 
-# ═════════════════════════════════════════════════════════════════════
-# MAIN
-# ═════════════════════════════════════════════════════════════════════
- 
+    print(f"Steps:        {steps}")
+    print(f"Total reward: {total_reward:.2f}")
+    print(f"Unmet load:   {total_unmet:.4f} kWh")
+    print(f"Final SoC:    {last_info.get('soc', 0.0):.3f}")
+    print(f"Earned:       {total_money_earned:.2f} UAH")
+
+
 if __name__ == '__main__':
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     np.random.seed(42)
@@ -362,7 +293,7 @@ if __name__ == '__main__':
     d_train, d_train_raw, d_eval, d_eval_raw = load_data()
 
     train_env, eval_env = make_envs(d_train, d_train_raw, d_eval, d_eval_raw)
-    
+
     model = make_model(train_env)
     callbacks = make_callbacks(train_env, eval_env)
     model = train(model, callbacks)
@@ -373,9 +304,9 @@ if __name__ == '__main__':
     print(f"obs_rms → {obs_rms_path}")
 
     save_and_test(model, eval_env)
- 
+
     print("\n" + "="*60)
-    print("Готово!")
-    print(f"Модель:      {CONFIG['model_save_path']}.zip")
+    print("Done!")
+    print(f"Model:       {CONFIG['model_save_path']}.zip")
     print(f"Tensorboard: tensorboard --logdir {CONFIG['tensorboard_dir']}")
     print("="*60)

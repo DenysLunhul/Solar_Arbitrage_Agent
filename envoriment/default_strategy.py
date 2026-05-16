@@ -1,19 +1,15 @@
 """
 inverter_dispatch.py
 ====================
-Генерація плану роботи на основі базової логіки гібридного інвертора.
-Інвертор не знає про ціни чи майбутні відключення. Він реагує лише на 
-наявність сонця, стан мережі та рівень заряду батареї (SoC).
+Dispatch plan based on primitive hybrid inverter logic.
+No price awareness or outage forecasting — reacts only to solar irradiance,
+grid presence, and current SoC.
 """
 
 import argparse
 import numpy as np
 import pandas as pd
 from environment import Environment
-
-# ═════════════════════════════════════════════════════════════════════
-# DEFAULT конфіг
-# ═════════════════════════════════════════════════════════════════════
 
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
@@ -30,7 +26,7 @@ DEFAULT_SYSTEM_CONFIG = {
     },
     'inverter': {
         'max_power':    100.0,
-        'efficiency': 0.95,  # Залишається для підрахунку витрат у CSV, інвертор цього не бачить
+        'efficiency': 0.95,
     },
     'grid':{
         'capacity': 150.0,
@@ -38,78 +34,53 @@ DEFAULT_SYSTEM_CONFIG = {
     },
 }
 
-# ═════════════════════════════════════════════════════════════════════
-# ЛОГІКА ІНВЕРТОРА
-# ═════════════════════════════════════════════════════════════════════
 
 def inverter_action(row: pd.Series, soc: float) -> np.ndarray:
-    """
-    Імітує примітивну логіку гібридного інвертора.
-    Ніяких цін, ніяких прогнозів відключень.
-    """
+    """Primitive hybrid inverter logic — no prices, no outage forecast."""
     gti         = float(row['Global_tilted_irradiance_instant'])
     grid_status = int(row['Grid'])
 
-    # Цільові показники інвертора
-    TARGET_SOC           = 0.70  # Звичайний цільовий заряд
-    MAX_SOC              = 0.95  # Дозволений максимум, якщо сонця дуже багато
-    MIN_SOLAR_THRESHOLD  = 10.0  # Мінімальне сонце (Вт/м²)
-    HIGH_SOLAR_THRESHOLD = 400.0 # Дуже багато сонця (яскравий полудень)
+    TARGET_SOC           = 0.70
+    MAX_SOC              = 0.95
+    MIN_SOLAR_THRESHOLD  = 10.0   # W/m²
+    HIGH_SOLAR_THRESHOLD = 400.0  # W/m²
 
-    # ── ПРАВИЛО 1: Немає мережі ──────────────────────────────────────
     if grid_status == 0:
-        # Віддаємо все з батареї на навантаження. Продавати/купувати неможливо.
+        # No grid: discharge battery to serve load
         return np.array([-1.0, 0.0], dtype=np.float32)
 
-    # ── ПРАВИЛО 2: Робота при наявній мережі ─────────────────────────
     if gti > MIN_SOLAR_THRESHOLD:
-        # СОНЦЕ Є
         if soc < TARGET_SOC:
-            # Пріоритет: зарядити батарею до 70% (і покрити навантаження)
-            # 1.0 = заряджати батарею, 0.0 = не намагатись експортувати
+            # Charge battery to 70% first
             return np.array([1.0, 0.0], dtype=np.float32)
-            
         elif gti > HIGH_SOLAR_THRESHOLD and soc < MAX_SOC:
-            # Сонця прям дуже багато, а батарея вже 70%
-            # Дозволяємо дозарядити батарею до 95% і паралельно продаємо в мережу
+            # Abundant sun: top up to 95% and export surplus
             return np.array([1.0, 1.0], dtype=np.float32)
-            
         else:
-            # Батарея досягла цілі (70% при звичайному сонці або 95% при сильному)
-            # Батарею не чіпаємо (0.0), весь надлишок сонця відправляємо в мережу (1.0)
+            # Battery at target: export all solar surplus
             return np.array([0.0, 1.0], dtype=np.float32)
-            
     else:
-        # СОНЦЯ НЕМАЄ (ніч / сутінки)
-        # Розряджаємо батарею, щоб перекрити навантаження підприємства (-1.0)
-        # Якщо батареї не вистачить, інвертор добере з мережі (-1.0)
+        # Night / low irradiance: discharge battery, grid covers the rest
         return np.array([-1.0, -1.0], dtype=np.float32)
 
 
-# ═════════════════════════════════════════════════════════════════════
-# ГЕНЕРАЦІЯ ПЛАНУ
-# ═════════════════════════════════════════════════════════════════════
-
 def generate_dispatch_plan(df_raw: pd.DataFrame, df_norm: pd.DataFrame, config: dict, initial_soc: float, output_file: str):
-    print("Запускаємо симуляцію базової логіки інвертора...")
-    
+    print("Running baseline inverter simulation...")
+
     env = Environment(df_raw=df_raw, df=df_norm, system_config=config)
     env.reset()
     env.soc = initial_soc
-    
+
     dispatch_history = []
 
     while True:
         curr_step = env.curr_step
         row = df_raw.iloc[curr_step]
-        
-        # Отримуємо дію від "інвертора" (передаємо тільки рядок і поточний SoC)
+
         action = inverter_action(row, env.soc)
-        
-        # Робимо крок у середовищі
+
         _, _, terminated, truncated, info = env.step(action)
-        
-        # Фінансовий підрахунок (інвертор цього не знає, але для CSV нам це корисно бачити)
+
         grid_kwh = info.get('actual_grid_kwh', 0)
         money_earned = 0.0
         if grid_kwh < 0:
@@ -133,7 +104,7 @@ def generate_dispatch_plan(df_raw: pd.DataFrame, df_norm: pd.DataFrame, config: 
             'mismatch': round(info.get('mismatch', 0), 4),
             'money_earned_ts': round(money_earned, 4)
         }
-        
+
         dispatch_history.append(record)
 
         if terminated or truncated:
@@ -141,25 +112,21 @@ def generate_dispatch_plan(df_raw: pd.DataFrame, df_norm: pd.DataFrame, config: 
 
     df_plan = pd.DataFrame(dispatch_history)
     df_plan.to_csv(output_file, index=False)
-    
-    print(f"Готово! Згенеровано {len(df_plan)} кроків.")
-    print(f"План збережено у файл: {output_file}")
 
+    print(f"Done. Generated {len(df_plan)} steps.")
+    print(f"Saved to: {output_file}")
 
-# ═════════════════════════════════════════════════════════════════════
-# CLI
-# ═════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--raw',     default='dataset_final.csv',         help='Сирий датасет')
-    parser.add_argument('--norm',    default='dataset_normalized.csv',    help='Нормалізований датасет')
-    parser.add_argument('--soc',     type=float, default=0.5,             help='Початковий SoC')
-    parser.add_argument('--days',    type=int,   default=1,            help='Скільки днів (None = весь датасет)')
-    parser.add_argument('--out',     default='results/dispatch_plan_inverter.csv', help='Куди зберегти CSV')
+    parser.add_argument('--raw',     default='dataset_final.csv')
+    parser.add_argument('--norm',    default='dataset_normalized.csv')
+    parser.add_argument('--soc',     type=float, default=0.5)
+    parser.add_argument('--days',    type=int,   default=1)
+    parser.add_argument('--out',     default='results/dispatch_plan_inverter.csv')
     args = parser.parse_args()
 
-    print("Завантажуємо дані...")
+    print("Loading data...")
     df_raw  = pd.read_csv(args.raw)
     df_norm = pd.read_csv(args.norm)
 
@@ -167,7 +134,7 @@ if __name__ == '__main__':
         df_raw  = df_raw.iloc[:args.days * 96].reset_index(drop=True)
         df_norm = df_norm.iloc[:args.days * 96].reset_index(drop=True)
 
-    print(f"Даних: {len(df_raw)} рядків ({len(df_raw)//96} днів)")
+    print(f"Data: {len(df_raw)} rows ({len(df_raw)//96} days)")
 
     generate_dispatch_plan(
         df_raw=df_raw,
