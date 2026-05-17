@@ -60,7 +60,6 @@ def combine(config_id, tilt=None, azimuth=None):
 
 
 if __name__ == "__main__":
-    # t, a = get_solar_parameters()
     t, a = 35, 0
     df = combine(0, t, a)
     df.to_csv("combined.csv", index=False)

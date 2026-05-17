@@ -43,6 +43,20 @@ def load_model_and_scalers(
     return model, scalers, obs_rms
 
 
+def _check_obs_rms(obs_rms, obs_dim: int):
+    """Return obs_rms if shape matches obs, else None with a warning."""
+    if obs_rms is None:
+        return None
+    rms_dim = obs_rms.mean.shape[0]
+    if rms_dim != obs_dim:
+        print(
+            f"WARNING: obs_rms shape ({rms_dim},) != env obs shape ({obs_dim},) — "
+            f"saved from an older training run, skipping normalisation. Retrain to fix."
+        )
+        return None
+    return obs_rms
+
+
 def run_inference(
     df_raw:        pd.DataFrame,
     system_config: dict,
@@ -52,6 +66,8 @@ def run_inference(
     obs_rms=None,
 ) -> dict:
     """Run the trained model on df_raw and return dispatch_plan + summary."""
+    import warnings
+    warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
 
     df_norm = pd.DataFrame([
         normalize_row(df_raw.iloc[i], scalers)
@@ -64,10 +80,13 @@ def run_inference(
     env.soc = float(np.clip(initial_soc, 0.0, 1.0))
     obs = env.get_observe()
 
+    # Validate obs_rms shape against current env obs — mismatches happen when
+    # obs_rms was saved from a training run with a different observation space.
+    obs_rms = _check_obs_rms(obs_rms, obs.shape[0])
+
     dispatch_plan = []
 
     while True:
-        # Apply VecNormalize obs_rms transform if model was trained with it
         if obs_rms is not None:
             obs_input = np.clip(
                 (obs - obs_rms.mean) / np.sqrt(obs_rms.var + 1e-8),
@@ -141,8 +160,7 @@ DEFAULT_SYSTEM_CONFIG = {
         'max_power': 250.0,
     },
     'grid': {
-        'capacity':     250.0,
-        'price_to_buy': 5.5,
+        'capacity': 250.0,
     },
 }
 
@@ -155,14 +173,14 @@ if __name__ == '__main__':
     _ENV_DIR = _ROOT / 'envoriment'
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data',    default=str(_ROOT / 'data_providers' / 'orchestrator' / 'combined.csv'))
     parser.add_argument('--model',   default=str(_ENV_DIR / 'models' / 'best' / 'best_model.zip'))
     parser.add_argument('--scalers', default=str(_ENV_DIR / 'models' / 'scalers.pkl'))
     parser.add_argument('--obsrms',  default=str(_ENV_DIR / 'models' / 'obs_rms.pkl'))
     parser.add_argument('--config',  default=None, help='JSON file with system_config')
     parser.add_argument('--output',  default=str(_ENV_DIR / 'results' / 'dispatch_plan.csv'))
-    parser.add_argument('--soc',     type=float, default=0.5)
-    parser.add_argument('--days',    type=int,   default=1)
+    parser.add_argument('--soc',     type=float, default=None, help='Initial SoC (0-1). Defaults to last run\'s final SoC, then 0.5.')
+    parser.add_argument('--tilt',    type=float, default=35.0, help='Solar panel tilt (degrees)')
+    parser.add_argument('--azimuth', type=float, default=0.0,  help='Solar panel azimuth (degrees)')
     args = parser.parse_args()
 
     if args.config:
@@ -175,16 +193,48 @@ if __name__ == '__main__':
 
     model, scalers, obs_rms = load_model_and_scalers(args.model, args.scalers, args.obsrms)
 
-    df = pd.read_csv(args.data)
-    df = df.iloc[:args.days * 96].reset_index(drop=True)
-    print(f"Data: {len(df)} rows ({args.days} days)\n")
+    # Always fetch fresh data from the orchestrator; fall back to cached combined.csv
+    # only when DAM prices are unavailable (before 14:00 or network error).
+    _COMBINED = _ROOT / 'data_providers' / 'orchestrator' / 'combined.csv'
+    try:
+        from data_providers.orchestrator.data_combiner import combine
+        df = combine(0, tilt=args.tilt, azimuth=args.azimuth)
+        if df is not None:
+            print(f"Data: fetched live from orchestrator ({len(df)} rows)")
+            df.to_csv(_COMBINED, index=False)
+        else:
+            print("DAM data unavailable — falling back to cached combined.csv")
+            df = pd.read_csv(_COMBINED)
+    except Exception as e:
+        print(f"Orchestrator error ({e}) — falling back to cached combined.csv")
+        df = pd.read_csv(_COMBINED)
+
+    df = df.iloc[:96].reset_index(drop=True)
+    print(f"Date: {str(df['timestamp'].iloc[0])[:10]}")
+
+    _SOC_FILE = _ENV_DIR / 'results' / 'last_soc.txt'
+    if args.soc is not None:
+        initial_soc = args.soc
+        print(f"SoC:  {initial_soc:.3f} (from --soc argument)")
+    elif _SOC_FILE.exists():
+        persisted_soc = float(_SOC_FILE.read_text().strip())
+        min_reserve = system_config['battery']['min_reserve'] / 100
+        initial_soc = max(persisted_soc, min_reserve)
+        if initial_soc > persisted_soc:
+            print(f"SoC:  {initial_soc:.3f} (clamped from {persisted_soc:.3f} — outage left battery below floor)")
+        else:
+            print(f"SoC:  {initial_soc:.3f} (from previous run's final SoC)")
+    else:
+        initial_soc = 0.5
+        print(f"SoC:  {initial_soc:.3f} (default — no previous run found)")
+    print()
 
     result = run_inference(
         df_raw=df,
         system_config=system_config,
         model=model,
         scalers=scalers,
-        initial_soc=args.soc,
+        initial_soc=initial_soc,
         obs_rms=obs_rms,
     )
 
@@ -197,5 +247,11 @@ if __name__ == '__main__':
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(result['dispatch_plan']).to_csv(output_path, index=False)
+
+    # Persist final SoC so the next day's run picks it up automatically.
+    final_soc = result['summary']['final_soc']
+    _SOC_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _SOC_FILE.write_text(str(final_soc))
     print(f"\nDispatch plan → {output_path}")
+    print(f"Final SoC {final_soc:.3f} saved → next run will start here")
     print(pd.DataFrame(result['dispatch_plan']).head(10).to_string())

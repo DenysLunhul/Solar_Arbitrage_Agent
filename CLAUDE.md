@@ -24,12 +24,16 @@ ds_project_demo/
 │   ├── normalize.py                       # Feature normalization: drop, scale, save scalers.pkl
 │   ├── dataset_final.csv                  # Copy of training dataset (25 cols, 35 041 rows)
 │   ├── dataset_normalized.csv             # Normalized training dataset (17 cols, used by train.py)
+│   ├── default_strategy.py                # Baseline inverter dispatch (no price awareness)
 │   ├── models/
 │   │   ├── sac_ems.zip                    # Final SAC model
 │   │   ├── best/best_model.zip            # Best checkpoint by eval reward
-│   │   ├── checkpoints/                   # Periodic checkpoints (every 50k steps)
+│   │   ├── checkpoints/                   # Periodic checkpoints (every 100k steps)
 │   │   ├── scalers.pkl                    # sklearn scalers fitted on training data
 │   │   └── obs_rms.pkl                    # VecNormalize running stats (required for inference)
+│   ├── results/
+│   │   ├── dispatch_plan.csv              # Last inference output
+│   │   └── last_soc.txt                   # Final SoC from last inference run (persisted across days)
 │   └── logs/
 │       ├── tensorboard/SAC_*/             # TensorBoard event files
 │       ├── monitor/                       # SB3 Monitor CSV logs
@@ -83,7 +87,8 @@ ds_project_demo/
 | Timestep | **15 minutes** (96 steps/day) |
 | Market | Ukrainian **DAM** via [oree.com.ua](https://www.oree.com.ua) |
 | Price unit | UAH / MWh |
-| Electricity tariff | **5.5 UAH/kWh** fixed (Ukrainian regulated residential rate) |
+| Sell price | **DAM_Price** UAH/kWh (dynamic, from OREE day-ahead market) |
+| Buy price | **DAM_Price + 3.0 UAH/kWh** (DAM + grid access tax) |
 | Site location | Lat **48.2904** °N, Lon **25.9324** °E (Chernivtsi, Western Ukraine) |
 | Horizon | Agent operates on **next-day** data assembled each evening (after 14:00 UA time) |
 
@@ -109,7 +114,7 @@ observation_space = Box(low=-inf, high=inf, shape=(n_features + 1,), dtype=float
 | Action dim | Meaning |
 |---|---|
 | `action[0]` | Battery: +1 = full charge, −1 = full discharge |
-| `action[1]` | Grid: −1 = full export, +1 = full import |
+| `action[1]` | Grid: +1 = full export (sell to grid), −1 = full import (buy from grid) |
 
 ### Hardware Parameters (from `system_config` dict)
 
@@ -132,7 +137,6 @@ system_config = {
     },
     'grid': {
         'capacity':     float,          # kW; effective limit = min(inverter, grid)
-        'price_to_buy': float,          # UAH/kWh fixed tariff
     },
 }
 ```
@@ -141,23 +145,44 @@ system_config = {
 
 Charge and discharge use **separate** power limits (`max_batt_charge_power_ts` and `max_batt_discharge_power_ts`).
 
-### Reward Function (7 components, all tracked separately in `info`)
+### Hard SoC Floor (BMS protection)
+
+When `grid_status == 1` (grid is up), the environment enforces a hard discharge floor at `soc_soft_min`. The agent physically cannot drain below this reserve. During outages (`grid_status == 0`), full discharge to 0 is allowed.
+
+This is implemented in Block 2 (discharge):
+```python
+if grid_status == 1:
+    max_drawable = max(0.0, (self.soc - self.soc_soft_min) * self.max_batt_capacity)
+else:
+    max_drawable = self.soc * self.max_batt_capacity
+```
+
+### Reward Function (9 components, all tracked separately in `info`)
 
 ```
-r_market      = grid_import × (-price_to_buy)  OR  |grid_export| × DAM_price/1000
+r_market      = grid_import × (-(DAM_price/1000 + 3.0))  OR  |grid_export| × DAM_price/1000
 r_lcos        = -(lcos × |batt_energy_cycled|)
-r_unmet       = -(unmet_load × price_to_buy × 2)        # if unmet_load > 0
-r_mismatch    = -(2.0 × |grid_commanded - grid_actual|)
-r_soc_soft    = -(3.0 × violation²)                     # outside [soc_min, 0.80]
-r_reserve     = -(30.0 × soc_deficit × log1p(outage_remaining_h))  # during outage
+r_unmet       = -(unmet_load × (DAM_price/1000 + 3.0) × 2)       # if unmet_load > 0
+r_mismatch    = -(2.0 × |grid_commanded - grid_actual|)           # ONLY when net_demand==0 AND grid is up
+r_soc_soft    = -(50.0 × violation²)                              # outside [soc_min, 0.80]
+r_reserve     = -(30.0 × soc_deficit × log1p(outage_remaining_h)) # during outage
 r_preparation = 5.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage
+r_soc_target  = actual_chem_in × buy_price                        # when pre_charge_soc < target_soc
+                                                                  # = avoided future purchase cost
+r_waste       = -(2.0 × lcos × wasted_kWh)                       # discharge that exceeds demand + available grid headroom
 
-reward = sum of all 7 components
+reward = sum of all 9 components
 ```
+
+**r_soc_target design rationale**: rewards storing energy at its avoidance value (`buy_price` per kWh stored), making charging toward the reserve target economically competitive with selling solar surplus. At midday buy_price ≈ 9 UAH/kWh: charging earns ~+9×kWh while r_lcos pays -1.5×kWh, net +7.5 UAH/kWh — stronger signal than solar spot selling.
+
+**r_mismatch scope**: only fires when `net_demand_after_batt < 1e-6` — i.e. when the agent actually controls the grid outcome. Skipped when environment must force grid import to cover unmet load (the agent's grid action is irrelevant there).
+
+**r_waste**: penalizes discharging more than demand + available grid export headroom can absorb. `wasted = batt_output - demand_covered - min(batt_surplus, grid_capacity - solar_surplus)`. Both solar surplus and battery surplus share the same grid capacity.
 
 ### `info` dict (returned by `step()`)
 
-`soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `battery_kwh` (+ = charging), `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`
+`soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `battery_kwh` (+ = charging), `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`
 
 ---
 
@@ -179,10 +204,10 @@ Run standalone: `python normalize.py --input dataset_final.csv --output dataset_
 
 ## Standalone Training Script (`envoriment/train.py`)
 
-Run from anywhere (auto `chdir` to `envoriment/`):
+Run from project root:
 
 ```bash
-python envoriment/train.py
+cd /home/denys/PycharmProjects/ds_demo/ds_project_demo && .venv/bin/python envoriment/train.py
 ```
 
 ### Key design decisions
@@ -194,30 +219,40 @@ solar     = capacity × uniform(0.8, 2.0) kWp
 inverter  = solar × uniform(0.8, 1.1) kW
 grid      = inverter × uniform(1.0, 1.5) kW   ← always ≥ inverter
 charge/discharge power = capacity / 2          ← C/2 rate
-price_to_buy = 5.5 UAH/kWh                    ← fixed (Ukrainian regulated tariff)
 ```
+Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is no `price_to_buy` config field.
 
 **Per-month 75/25 split**: for each of the 12 months, first 75% of rows → train, last 25% → eval. All seasons represented in both sets. No seasonal bias.
 
 **VecNormalize**: obs normalized with `clip_obs=10.0`; reward normalized on train env, raw on eval env.
 
+**SyncNormalizeEvalCallback**: before each eval run, deep-copies `train_env.obs_rms` → `eval_env.obs_rms` so both use the same running stats. Without this, the eval Q-function evaluates against a different observation distribution than it was trained on.
+
 **Eval env**: fixed `DEFAULT_SYSTEM_CONFIG` (200 kWh mid-range) for stable training progress tracking.
+
+**reset() SoC randomization**: `self.soc = uniform(0.0, 1.0)` on each episode reset — ensures the agent sees all SoC levels during training, not just SoC=0.
+
+**Callback freq scaling**: `save_freq = checkpoint_freq // n_envs` — SB3 callback `_on_step()` fires once per `n_envs` environment steps, so dividing keeps checkpoints at the intended absolute step count.
 
 ### Configuration
 
 | Parameter | Value |
 |---|---|
 | Algorithm | SAC (MlpPolicy) |
-| Total timesteps | 1 000 000 |
-| Buffer size | 500 000 |
-| Batch size | 256 |
+| Total timesteps | 5 000 000 |
+| Buffer size | 1 000 000 |
+| Batch size | 512 |
 | Learning rate | 3e-4 |
-| Network arch | [256, 256] |
+| Network arch | [512, 512] |
+| n_envs | 32 (DummyVecEnv) |
 | Gamma | 0.99 |
 | Entropy coef | auto |
-| Checkpoint frequency | every 50 000 steps |
-| Eval frequency | every 50 000 steps, 1 episode |
+| Checkpoint frequency | every 100 000 env steps |
+| Eval frequency | every 100 000 env steps, 5 episodes |
 | Seed | 42 (numpy + SAC) |
+| Device | cuda |
+
+**DummyVecEnv chosen over SubprocVecEnv**: env step = 0.11 ms, SubprocVecEnv pipe overhead = ~13 ms → DummyVecEnv is ~7× faster on this hardware.
 
 ### Outputs
 
@@ -255,9 +290,15 @@ result = run_inference(
 # result = {'dispatch_plan': [...96 dicts...], 'summary': {...}}
 ```
 
-**`dispatch_plan`** per step includes: `step`, `action_battery`, `action_grid`, `soc`, `target_soc`, `solar_gen_kwh`, `solar_surplus_kwh`, `battery_kwh`, `grid_kwh`, `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`
+**`dispatch_plan`** per step includes: `step`, `action_battery`, `action_grid`, `soc`, `target_soc`, `solar_gen_kwh`, `solar_surplus_kwh`, `battery_kwh`, `grid_kwh`, `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`
 
 **Model cache**: `load_model_and_scalers()` must be called once at startup. In FastAPI, `prediction_service.py` caches models by `config_id` in `_model_cache` dict.
+
+**Standalone `__main__` mode** (`python envoriment/inference.py`):
+- Calls `data_combiner.combine()` for live data; falls back to `combined.csv` if DAM unavailable or error
+- `--soc` arg is optional; if omitted reads `envoriment/results/last_soc.txt`, clamped to `min_reserve`; defaults to 0.5 if no file exists
+- Saves final SoC to `last_soc.txt` after each run so the next day starts from real battery state
+- Args: `--model`, `--scalers`, `--obsrms`, `--config` (JSON), `--output`, `--soc`, `--tilt`, `--azimuth`
 
 ---
 
@@ -306,9 +347,10 @@ SiteConfig.to_env_dict() → {
     'battery': { capacity_kwh, min_reserve, lcos, max_charge_power, max_discharge_power, efficiency },
     'solar':   { peak_power, efficiency },
     'inverter':{ max_power },
-    'grid':    { capacity, price_to_buy },   # price_to_buy ← Grid.price_buy_from_grid
+    'grid':    { capacity },
 }
 ```
+`price_to_buy` was removed — buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()`.
 
 ### Database Models
 
@@ -329,7 +371,7 @@ SiteConfig.to_env_dict() → {
 - **Model cache**: `_model_cache: dict[int, tuple]` keyed by `config_id` — model loaded from disk once, reused forever
 - **Timezone**: gate and date calculations use `UTC+2` (Ukrainian time)
 - **Paths**: absolute paths anchored to `Path(__file__).resolve().parent.parent.parent`
-- **`initial_soc`**: passed as query param `GET /predictions/?initial_soc=0.6`, validated `[0.0, 1.0]`
+- **`initial_soc`**: passed as query param `GET /predictions/?initial_soc=0.6`, validated `[0.0, 1.0]`; if omitted, read from DB (last step SoC of previous prediction for this config), clamped to `min_reserve` so an outage-drained battery doesn't cascade into the next day
 - **All 30+ `AgentPredictions` columns populated** including reward breakdown and battery/solar flows
 
 ### Backend Trainer (`backend/core/trainer.py`)
@@ -343,10 +385,11 @@ Triggered by `POST /config/train` only if no ready model exists. Uses **PPO** (2
 | # | Location | Status | Issue |
 |---|---|---|---|
 | 1 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active |
-| 2 | Backend vs standalone training | ⚠️ Diverged | `backend/core/trainer.py` uses PPO 200k steps; `envoriment/train.py` uses SAC 1M steps + VecNormalize + domain randomization. Not unified. |
+| 2 | Backend vs standalone training | ⚠️ Diverged | `backend/core/trainer.py` uses PPO 200k steps; `envoriment/train.py` uses SAC 5M steps + VecNormalize + domain randomization. Not unified. |
 | 3 | `requirements.txt` | ⚠️ Partial | Missing: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
-| 4 | Real SoC input | ⚠️ Manual | `initial_soc` must be passed manually — no BMS/inverter integration |
+| 4 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via `last_soc.txt` (standalone) and DB (API), but no live BMS/inverter integration |
 | 5 | No `GET /predictions/history` | ❌ Open | Predictions stored in DB but no endpoint to retrieve them without re-running inference |
+| 6 | Outage over-discharge | ⚠️ Training | Model over-discharges during outages (wastes energy). SoC clamp prevents next-day cascade. Should improve after full 5M-step training via `r_waste` / `r_reserve` penalties. |
 
 ---
 

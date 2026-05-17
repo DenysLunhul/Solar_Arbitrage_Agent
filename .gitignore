@@ -5,7 +5,19 @@ __pycache__/
 *.egg-info/
 .DS_Store
 .env
+.claude
 
+# SQLite caches
+*.cache.sqlite
+.cache.sqlite
 
-# Data cache
+# Generated data / live pipeline outputs
+data_providers/orchestrator/combined.csv
 data_providers/orchestrator/.cache.sqlite
+
+# Training artifacts (large binaries / auto-generated logs)
+envoriment/models/checkpoints/
+envoriment/logs/monitor/
+envoriment/logs/eval/
+envoriment/logs/tensorboard/
+envoriment/results/

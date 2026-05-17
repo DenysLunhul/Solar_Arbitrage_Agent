@@ -11,7 +11,7 @@ router = APIRouter(prefix="/predictions", tags=["predictions"])
 @router.get("/")
 def get_predictions(
     config_name: str,
-    initial_soc: float = Query(default=0.5, ge=0.0, le=1.0),
+    initial_soc: float | None = Query(default=None, ge=0.0, le=1.0),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):

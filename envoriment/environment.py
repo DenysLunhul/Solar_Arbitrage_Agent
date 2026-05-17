@@ -6,11 +6,12 @@ import pandas as pd
 
 class Environment(gym.Env):
 
-    def __init__(self, df_raw: pd.DataFrame, df: pd.DataFrame, system_config: dict):
+    def __init__(self, df_raw: pd.DataFrame, df: pd.DataFrame, system_config: dict, episode_len: int = 96):
         super().__init__()
 
         self.df = df
         self.df_raw = df_raw
+        self.episode_len = episode_len
 
         batt  = system_config['battery']
         solar = system_config['solar']
@@ -31,7 +32,6 @@ class Environment(gym.Env):
 
         self.max_grid_capacity    = min(inv['max_power'], grid['capacity'])
         self.max_grid_capacity_ts = self.max_grid_capacity / 4
-        self.price_to_buy         = grid['price_to_buy']
 
         self.solar_peak_power_kw  = solar['peak_power']
         self.solar_efficiency     = solar['efficiency']
@@ -39,12 +39,17 @@ class Environment(gym.Env):
         # P_peak[kW] = GTI_stc[W/m²] × η × Area[m²], GTI_stc=1000 → Area = peak_power / η
         self.panel_area_m2        = self.solar_peak_power_kw / self.solar_efficiency
 
-        self.soc       = 0.0
-        self.curr_step = 0
+        self.soc            = 0.0
+        self.curr_step      = 0
+        self.episode_start  = 0
+
+        # Number of valid episode start positions (each episode = episode_len steps)
+        self._n_starts = max(1, len(df) - episode_len + 1)
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         n_features = df.shape[1]
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(n_features + 1,), dtype=np.float32)
+        # 17 normalized features + SoC + episode_len remaining DAM prices (price profile lookahead)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(n_features + 1 + episode_len,), dtype=np.float32)
 
     def _calc_solar_generation_ts(self, gti_w_m2: float) -> float:
         power_w       = gti_w_m2 * self.solar_efficiency * self.panel_area_m2
@@ -67,13 +72,25 @@ class Environment(gym.Env):
         return float(target_soc)
 
     def get_observe(self) -> np.ndarray:
-        row = self.df.iloc[self.curr_step]
-        return np.append(row.values, self.soc).astype(np.float32)
+        idx = min(self.curr_step, len(self.df) - 1)
+        row = self.df.iloc[idx]
+        base = np.append(row.values, self.soc)
+
+        # Remaining episode DAM prices from current step onward.
+        # episode_start marks the beginning of this 96-step day; zeros pad elapsed slots.
+        episode_end = self.episode_start + self.episode_len
+        remaining   = self.df['DAM_Price'].iloc[idx:episode_end].values
+        price_vec   = np.zeros(self.episode_len, dtype=np.float32)
+        price_vec[:len(remaining)] = remaining
+
+        return np.concatenate([base, price_vec]).astype(np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.soc       = float(np.random.uniform(0.0, 1.0))
-        self.curr_step = 0
+        self.soc           = float(np.random.uniform(0.0, 1.0))
+        # Random day-aligned start so every episode samples a fresh market/weather context.
+        self.episode_start = int(np.random.randint(0, self._n_starts))
+        self.curr_step     = self.episode_start
         return self.get_observe(), {}
 
     def step(self, action):
@@ -238,12 +255,9 @@ class Environment(gym.Env):
         reward = r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste
 
         self.curr_step += 1
-        terminated  = self.curr_step >= len(self.df)
-        truncated   = False
-        # On terminal step curr_step == len(df) which is out of bounds.
-        # SB3 discards this obs anyway (calls reset() right after), so return last valid row.
-        obs_idx     = min(self.curr_step, len(self.df) - 1)
-        observation = np.append(self.df.iloc[obs_idx].values, self.soc).astype(np.float32)
+        terminated = self.curr_step >= self.episode_start + self.episode_len
+        truncated  = False
+        observation = self.get_observe()
 
         info = {
             'soc':               self.soc,

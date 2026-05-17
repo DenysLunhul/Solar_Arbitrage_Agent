@@ -28,9 +28,8 @@ DEFAULT_SYSTEM_CONFIG = {
         'max_power':    100.0,
         'efficiency': 0.95,
     },
-    'grid':{
+    'grid': {
         'capacity': 150.0,
-        'price_to_buy': 10.0
     },
 }
 
@@ -82,12 +81,13 @@ def generate_dispatch_plan(df_raw: pd.DataFrame, df_norm: pd.DataFrame, config: 
         _, _, terminated, truncated, info = env.step(action)
 
         grid_kwh = info.get('actual_grid_kwh', 0)
+        sell_price = float(row['DAM_Price']) / 1000
+        buy_price  = sell_price + 3.0
         money_earned = 0.0
         if grid_kwh < 0:
-            price = float(row['DAM_Price']) / 1000
-            money_earned = abs(grid_kwh) * price
+            money_earned = abs(grid_kwh) * sell_price
         elif grid_kwh > 0:
-            money_earned = - (grid_kwh * config['grid']['price_to_buy'])
+            money_earned = -(grid_kwh * buy_price)
 
         record = {
             'step': curr_step,

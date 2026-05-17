@@ -37,7 +37,7 @@ def _load_model(agent_model) -> tuple:
     return _model_cache[config_id]
 
 
-def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: float) -> dict:
+def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: float | None) -> dict:
     if datetime.now(UA_TZ).hour < 14:
         raise HTTPException(
             status_code=status.HTTP_425_TOO_EARLY,
@@ -54,6 +54,15 @@ def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: fl
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No trained model for this config. POST /config/train first.",
         )
+
+    if initial_soc is None:
+        persisted_soc = prediction_repo.get_last_soc(db, raw_config.id)
+        if persisted_soc is not None:
+            system_config = SiteConfig(**raw_config.settings).to_env_dict()
+            min_reserve = system_config['battery']['min_reserve'] / 100
+            initial_soc = max(persisted_soc, min_reserve)
+        else:
+            initial_soc = 0.5
 
     df_raw = combine(raw_config.id)
     if df_raw is None or df_raw.isnull().values.any():
@@ -93,7 +102,7 @@ def _build_rows(
             timestamp=pd.to_datetime(row["timestamp"]),
             battery_action=step_data["action_battery"],
             grid_action=step_data["action_grid"],
-            load_kwh=float(row["Load"]) / 1000 / 4,
+            load_kwh=float(row["Load"]) / 4,
             solar_kwh=step_data["solar_gen_kwh"],
             solar_surplus_kwh=step_data["solar_surplus_kwh"],
             battery_kwh=step_data["battery_kwh"],
@@ -111,9 +120,12 @@ def _build_rows(
             reward_market=step_data["reward_market"],
             reward_lcos=step_data["reward_lcos"],
             reward_unmet=step_data["reward_unmet"],
+            reward_mismatch=step_data["reward_mismatch"],
             reward_soc_soft=step_data["reward_soc_soft"],
             reward_reserve=step_data["reward_reserve"],
             reward_preparation=step_data["reward_preparation"],
+            reward_soc_target=step_data["reward_soc_target"],
+            reward_waste=step_data["reward_waste"],
             reward_total=step_data["reward"],
         ))
     return rows

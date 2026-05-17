@@ -1,4 +1,3 @@
-
 import copy
 import os
 import pickle
@@ -28,24 +27,24 @@ CONFIG = {
     'tensorboard_dir': 'logs/tensorboard/',
     'monitor_dir':     'logs/monitor/',
 
-    'total_timesteps': 2_000_000,
-    'checkpoint_freq': 50_000,
-    'log_interval':    1,      # SAC counts episodes not steps — log after every episode
-    'n_envs':          16,     # 16 workers × ~1.1 ms collection + ~4 ms GPU update ≈ 3 000 steps/sec
+    'total_timesteps': 10_000_000,
+    'checkpoint_freq': 100_000,
+    'log_interval':    100_000,  # large value — suppress SB3 default episode logging
+    'n_envs':          32,       # DummyVecEnv: no IPC overhead, env step ~0.11 ms each
 
     'sac_params': {
-        'device':         'cuda',
-        'buffer_size':    1_000_000,
-        'learning_starts': 1_000,
-        'batch_size':      256,
+        'device':          'cuda',
+        'buffer_size':     1_000_000,
+        'learning_starts': 10_000,   # ~6 full episodes across 16 envs before first update
+        'batch_size':      512,
         'learning_rate':   3e-4,
         'gamma':           0.99,
         'tau':             0.005,
         'ent_coef':        'auto',
         'policy_kwargs': {
-            'net_arch': [256, 256],
+            'net_arch': [512, 512],  # 114-dim obs needs more capacity than 256×256
         },
-        'verbose': 1,
+        'verbose': 0,
         'seed':    42,
         'target_entropy': 'auto',
         'use_sde':        False,
@@ -69,8 +68,7 @@ DEFAULT_SYSTEM_CONFIG = {
         'max_power': 200.0,
     },
     'grid': {
-        'capacity':     250.0,
-        'price_to_buy': 0.0,  # unused — buy_price computed dynamically as DAM + 3
+        'capacity': 250.0,
     },
 }
 
@@ -78,10 +76,11 @@ DEFAULT_SYSTEM_CONFIG = {
 # Domain randomization: each reset() samples a new hardware config so the model
 # learns to operate correctly across diverse battery/solar/inverter/grid sizes.
 class RandomConfigWrapper(gym.Wrapper):
-    def __init__(self, df: pd.DataFrame, df_raw: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, df_raw: pd.DataFrame, episode_len: int = 96):
         self.df = df
         self.df_raw = df_raw
-        env = Environment(df_raw=df_raw, df=df, system_config=self._sample_config())
+        self.episode_len = episode_len
+        env = Environment(df_raw=df_raw, df=df, system_config=self._sample_config(), episode_len=episode_len)
         super().__init__(env)
 
     def _sample_config(self) -> dict:
@@ -106,13 +105,12 @@ class RandomConfigWrapper(gym.Wrapper):
                 'max_power': inverter_max,
             },
             'grid': {
-                'capacity':     grid_capacity,
-                'price_to_buy': 0.0,  # unused — buy_price computed dynamically as DAM + 3
+                'capacity': grid_capacity,
             },
         }
 
     def reset(self, **kwargs):
-        self.env = Environment(df_raw=self.df_raw, df=self.df, system_config=self._sample_config())
+        self.env = Environment(df_raw=self.df_raw, df=self.df, system_config=self._sample_config(), episode_len=self.episode_len)
         return self.env.reset(**kwargs)
 
 
@@ -150,12 +148,13 @@ def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
             )
         return _init
 
-    # SubprocVecEnv parallelises env stepping across CPU cores (main speedup for MLP policies)
-    train_env = SubprocVecEnv([make_train_env(i) for i in range(n)])
+    # DummyVecEnv (single process, no IPC): faster than SubprocVecEnv when env step < pipe overhead.
+    # Benchmarked: env step = 0.11 ms, SubprocVecEnv pipe = ~13 ms → DummyVecEnv wins 7×.
+    train_env = DummyVecEnv([make_train_env(i) for i in range(n)])
 
     eval_env = DummyVecEnv([
         lambda: Monitor(
-            Environment(df_raw=df_eval_raw, df=df_eval, system_config=DEFAULT_SYSTEM_CONFIG),
+            Environment(df_raw=df_eval_raw, df=df_eval, system_config=DEFAULT_SYSTEM_CONFIG, episode_len=96),
             filename=os.path.join(CONFIG['monitor_dir'], 'eval')
         )
     ])
@@ -187,6 +186,31 @@ def make_model(train_env):
     print(f"Architecture: {CONFIG['sac_params']['policy_kwargs']['net_arch']}")
 
     return model
+
+
+class StatsCallback(BaseCallback):
+    """Prints one summary line to stdout every `log_every` env steps."""
+
+    def __init__(self, log_every: int = 100_000):
+        super().__init__(verbose=0)
+        self.log_every  = log_every
+        self._last_log  = 0
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_log >= self.log_every:
+            buf = self.model.ep_info_buffer
+            if buf:
+                mean_rew = np.mean([e['r'] for e in buf])
+                mean_len = np.mean([e['l'] for e in buf])
+                print(
+                    f"step {self.num_timesteps:>9,} | "
+                    f"ep_rew_mean {mean_rew:>10.2f} | "
+                    f"ep_len_mean {mean_len:>5.0f}"
+                )
+            else:
+                print(f"step {self.num_timesteps:>9,} | collecting...")
+            self._last_log = self.num_timesteps
+        return True
 
 
 class SyncNormalizeEvalCallback(EvalCallback):
@@ -230,7 +254,9 @@ def make_callbacks(train_env, eval_env):
         verbose=1,
     )
 
-    return CallbackList([checkpoint_cb, eval_cb])
+    stats_cb = StatsCallback(log_every=100_000)
+
+    return CallbackList([checkpoint_cb, eval_cb, stats_cb])
 
 
 def train(model, callbacks):

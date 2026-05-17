@@ -71,9 +71,12 @@ class AgentPredictions(Base):
     reward_market      = Column(Float)
     reward_lcos        = Column(Float)
     reward_unmet       = Column(Float)
+    reward_mismatch    = Column(Float)
     reward_soc_soft    = Column(Float)
     reward_reserve     = Column(Float)
     reward_preparation = Column(Float)
+    reward_soc_target  = Column(Float)
+    reward_waste       = Column(Float)
     reward_total       = Column(Float)
 
 

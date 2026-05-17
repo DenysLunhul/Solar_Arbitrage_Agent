@@ -24,7 +24,6 @@ class SolarPanel(BaseModel):
 
 class Grid(BaseModel):
     grid_capacity: float
-    price_buy_from_grid: float
 
 
 class SiteConfig(BaseModel):
@@ -52,8 +51,7 @@ class SiteConfig(BaseModel):
                 'max_power': self.inverter.max_power,
             },
             'grid': {
-                'capacity':     self.grid.grid_capacity,
-                'price_to_buy': self.grid.price_buy_from_grid,
+                'capacity': self.grid.grid_capacity,
             },
         }
 

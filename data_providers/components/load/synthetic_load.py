@@ -5,24 +5,45 @@ from datetime import date, timedelta
 
 def fetch_load(today: date) -> pd.DataFrame:
     tomorrow = today + timedelta(days=1)
-    day_of_week = tomorrow.isoweekday()
+    day_of_week = tomorrow.isoweekday()  # 1=Mon … 7=Sun
 
-    hours = range(0, 24)
-    minutes = [0, 15, 30, 45]
-    rows = [
-        {"Hour": h, "Minute": m}
-        for h in hours
-        for m in minutes
-    ]
-    df = pd.DataFrame(rows)
+    # Seed from date for reproducible results per day
+    rng = np.random.default_rng(int(tomorrow.strftime('%Y%m%d')))
 
-    base = np.where((df["Hour"] >= 8) & (df["Hour"] <= 18), 170.0, 50.0)
+    steps = [{"Hour": h, "Minute": m} for h in range(24) for m in [0, 15, 30, 45]]
+    df = pd.DataFrame(steps)
+
+    def base_kw(hour: int, minute: int) -> float:
+        t = hour + minute / 60.0
+        if t < 6.0:
+            return 20.0
+        elif t < 8.0:
+            return 20.0 + (t - 6.0) / 2.0 * 40.0   # ramp 20 → 60 kW over 2 h
+        elif t <= 18.0:
+            return 60.0
+        elif t < 20.0:
+            return 60.0 - (t - 18.0) / 2.0 * 40.0  # ramp 60 → 20 kW over 2 h
+        else:
+            return 20.0
+
+    base = np.array([base_kw(r.Hour, r.Minute) for r in df.itertuples()])
+
     if day_of_week >= 6:
-        base = base * 0.4
+        base = base * 0.45
 
-    noise = np.random.uniform(0.85, 1.15, size=len(df))
-    spikes = np.where(np.random.rand(len(df)) > 0.98, np.random.uniform(100, 200, size=len(df)), 0.0)
+    noise = rng.uniform(0.88, 1.12, size=len(df))
+    load = base * noise
 
-    df["Load"] = (base * noise + spikes).round(2)
+    # 1–2 short industrial spikes during business hours (steps 36–68 = 9:00–17:00)
+    if day_of_week < 6:
+        n_spikes = int(rng.integers(1, 3))
+        centers = rng.integers(36, 69, size=n_spikes)
+        for center in centers:
+            amp = rng.uniform(1.20, 1.35)
+            for offset in (-1, 0, 1):   # 3 steps = 45 min per spike
+                idx = int(center) + offset
+                if 0 <= idx < len(load):
+                    load[idx] = min(load[idx] * amp, base[idx] * 1.35)
 
+    df["Load"] = load.round(2)
     return df[["Load"]]
