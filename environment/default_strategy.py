@@ -137,6 +137,7 @@ def generate_dispatch_plan(
             'action_battery':    round(float(action[0]), 4),
             'action_grid':       round(float(action[1]), 4),
             'soc':               round(float(info['soc']), 4),
+            'target_soc':        round(float(info['target_soc']), 4),
             'solar_gen_kwh':     round(float(info['solar_gen_ts_kwh']), 4),
             'solar_surplus_kwh': round(float(info['solar_surplus_kwh']), 4),
             'battery_kwh':       round(float(info['battery_kwh']), 4),

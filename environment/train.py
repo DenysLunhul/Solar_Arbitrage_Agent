@@ -233,7 +233,7 @@ def make_callbacks(train_env, eval_env):
         best_model_save_path=os.path.join('models', 'best'),
         log_path=os.path.join('logs', 'eval'),
         eval_freq=freq,
-        n_eval_episodes=5,
+        n_eval_episodes=20,
         deterministic=True,
         verbose=1,
     )

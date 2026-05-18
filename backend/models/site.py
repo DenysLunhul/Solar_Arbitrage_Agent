@@ -88,14 +88,3 @@ class AgentPredictions(Base):
     reward_total       = Column(Float)
 
 
-class AgentModels(Base):
-    __tablename__ = "agent_models"
-
-    id              = Column(Integer, primary_key=True, index=True)
-    config_id       = Column(Integer, ForeignKey("system_configs.id"), index=True)
-    status          = Column(String)
-    algorithm       = Column(String, default="PPO")
-    trained_at      = Column(DateTime)
-    total_timesteps = Column(Integer)
-    storage_path    = Column(String)
-    mean_reward     = Column(Float, nullable=True)

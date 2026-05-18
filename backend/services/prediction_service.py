@@ -1,40 +1,40 @@
+import pickle
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
-from stable_baselines3 import PPO, SAC
+from stable_baselines3 import SAC
 
 from backend.models.site import AgentPredictions
-from backend.repositories import config_repo, model_repo, prediction_repo
+from backend.repositories import config_repo, prediction_repo, strategy_repo
 from backend.schemas.schemas import SiteConfig
 from data_providers.orchestrator.data_combiner import combine
 from environment.inference import load_model_and_scalers, run_inference
+from environment.default_strategy import generate_dispatch_plan
+from environment.normalize import normalize_row
 
 _BASE_DIR    = Path(__file__).resolve().parent.parent.parent
-SCALERS_PATH = str(_BASE_DIR / "envoriment" / "models" / "scalers.pkl")
-OBS_RMS_PATH = str(_BASE_DIR / "envoriment" / "models" / "obs_rms.pkl")
+MODEL_PATH   = str(_BASE_DIR / "environment" / "models" / "best" / "best_model")
+SCALERS_PATH = str(_BASE_DIR / "environment" / "models" / "scalers.pkl")
+OBS_RMS_PATH = str(_BASE_DIR / "environment" / "models" / "obs_rms.pkl")
 
 UA_TZ = timezone(timedelta(hours=2))
 
-_ALGO_CLS = {"PPO": PPO, "SAC": SAC}
-
-_model_cache: dict[int, tuple] = {}
+_cached_model: tuple | None = None
 
 
-def _load_model(agent_model) -> tuple:
-    config_id = agent_model.config_id
-    if config_id not in _model_cache:
-        algo = agent_model.algorithm or "PPO"
-        model_cls = _ALGO_CLS.get(algo, PPO)
-        _model_cache[config_id] = load_model_and_scalers(
-            model_path=agent_model.storage_path.replace(".zip", ""),
+def _get_model() -> tuple:
+    global _cached_model
+    if _cached_model is None:
+        _cached_model = load_model_and_scalers(
+            model_path=MODEL_PATH,
             scalers_path=SCALERS_PATH,
             obs_rms_path=OBS_RMS_PATH,
-            model_cls=model_cls,
+            model_cls=SAC,
         )
-    return _model_cache[config_id]
+    return _cached_model
 
 
 def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: float | None) -> dict:
@@ -47,13 +47,6 @@ def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: fl
     raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
     if raw_config is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Config not found")
-
-    agent_model = model_repo.get_ready_for_config(db, raw_config.id)
-    if agent_model is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No trained model for this config. POST /config/train first.",
-        )
 
     if initial_soc is None:
         persisted_soc = prediction_repo.get_last_soc(db, raw_config.id)
@@ -68,7 +61,7 @@ def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: fl
     if df_raw is None or df_raw.isnull().values.any():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Dataset has null values")
 
-    model, scalers, obs_rms = _load_model(agent_model)
+    model, scalers, obs_rms = _get_model()
 
     result = run_inference(
         df_raw=df_raw,
@@ -85,7 +78,90 @@ def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: fl
         db, _build_rows(result["dispatch_plan"], df_raw, user_id, raw_config.id, tomorrow)
     )
 
-    return result
+    return _build_response(result, df_raw)
+
+
+def _build_response(result: dict, df_raw: pd.DataFrame) -> dict:
+    steps = []
+    for s in result["dispatch_plan"]:
+        row = df_raw.iloc[s["step"]]
+        steps.append({
+            "timestamp":         str(row["timestamp"]),
+            "soc":               s["soc"],
+            "target_soc":        s["target_soc"],
+            "solar_kwh":         s["solar_gen_kwh"],
+            "load_kwh":          round(float(row["Load"]) / 4, 4),
+            "battery_kwh":       s["battery_kwh"],
+            "grid_kwh":          s["grid_kwh"],
+            "unmet_load_kwh":    s["unmet_load_kwh"],
+            "money_earned_ts":   s["money_earned_ts"],
+            "dam_price":         round(float(row["DAM_Price"]) / 1000, 4),
+            "grid_status":       int(row["Grid"]),
+            "hours_until_outage": round(float(row["hours_until_outage"]), 2),
+        })
+
+    raw = result["summary"]
+    summary = {
+        "total_money_earned": raw["total_money_earned"],
+        "bought_kwh":         raw["bought_kwh"],
+        "sold_kwh":           raw["sold_kwh"],
+        "solar_kwh":          raw["solar_kwh"],
+        "unmet_load_kwh":     raw["unmet_load_kwh"],
+        "lcos_total_uah":     raw["lcos_total_uah"],
+        "initial_soc":        raw["initial_soc"],
+        "final_soc":          raw["final_soc"],
+        "steps":              raw["steps"],
+    }
+
+    return {
+        "summary": summary,
+        "dispatch_plan": steps,
+    }
+
+
+def get_default_predictions(db, config_name: str, user_id: int, strategy_name: str, initial_soc: float | None) -> dict:
+    if datetime.now(UA_TZ).hour < 14:
+        raise HTTPException(
+            status_code=status.HTTP_425_TOO_EARLY,
+            detail="DAM data for tomorrow is not yet available. Please call after 14:00.",
+        )
+
+    raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
+    if raw_config is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Config not found")
+
+    strategy_row = strategy_repo.get(db, user_id, strategy_name)
+    if strategy_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
+
+    if initial_soc is None:
+        persisted_soc = prediction_repo.get_last_soc(db, raw_config.id)
+        if persisted_soc is not None:
+            system_config = SiteConfig(**raw_config.settings).to_env_dict()
+            min_reserve = system_config['battery']['min_reserve'] / 100
+            initial_soc = max(persisted_soc, min_reserve)
+        else:
+            initial_soc = 0.5
+
+    df_raw = combine(raw_config.id)
+    if df_raw is None or df_raw.isnull().values.any():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Dataset has null values")
+
+    with open(SCALERS_PATH, 'rb') as f:
+        scalers = pickle.load(f)
+
+    df_norm = pd.DataFrame([normalize_row(df_raw.iloc[i], scalers) for i in range(len(df_raw))])
+
+    system_config = SiteConfig(**raw_config.settings).to_env_dict()
+    result = generate_dispatch_plan(
+        df_raw=df_raw,
+        df_norm=df_norm,
+        config=system_config,
+        initial_soc=initial_soc,
+        strategy=strategy_row.settings,
+    )
+
+    return _build_response(result, df_raw)
 
 
 def _build_rows(

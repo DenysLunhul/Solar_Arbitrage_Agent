@@ -22,18 +22,19 @@ ds_project_demo/
 │   ├── train.py                           # Standalone SAC training script (domain randomization)
 │   ├── inference.py                       # Inference module: run_inference() for FastAPI integration
 │   ├── normalize.py                       # Feature normalization: drop, scale, save scalers.pkl
+│   ├── default_strategy.py                # Configurable rule-based inverter dispatch (no price awareness)
 │   ├── dataset_final.csv                  # Copy of training dataset (25 cols, 35 041 rows)
 │   ├── dataset_normalized.csv             # Normalized training dataset (17 cols, used by train.py)
-│   ├── default_strategy.py                # Baseline inverter dispatch (no price awareness)
 │   ├── models/
-│   │   ├── sac_ems.zip                    # Final SAC model
-│   │   ├── best/best_model.zip            # Best checkpoint by eval reward
-│   │   ├── checkpoints/                   # Periodic checkpoints (every 100k steps)
+│   │   ├── sac_ems.zip                    # Final SAC model (last training run)
+│   │   ├── best/best_model.zip            # Best checkpoint by eval reward ← used by API
 │   │   ├── scalers.pkl                    # sklearn scalers fitted on training data
 │   │   └── obs_rms.pkl                    # VecNormalize running stats (required for inference)
-│   ├── results/
-│   │   ├── dispatch_plan.csv              # Last inference output
-│   │   └── last_soc.txt                   # Final SoC from last inference run (persisted across days)
+│   ├── testing/
+│   │   ├── backtest_sac.py                # Full-dataset backtest using SAC model
+│   │   ├── backtest_default.py            # Full-dataset backtest using default strategy
+│   │   ├── compare.py                     # Side-by-side comparison + per-month breakdown
+│   │   └── results/                       # Output CSVs (gitignored)
 │   └── logs/
 │       ├── tensorboard/SAC_*/             # TensorBoard event files
 │       ├── monitor/                       # SB3 Monitor CSV logs
@@ -41,11 +42,10 @@ ds_project_demo/
 ├── data_providers/
 │   ├── orchestrator/
 │   │   ├── data_combiner.py               # Main entry: assembles "tomorrow" DataFrame from all providers
-│   │   ├── combined.csv                   # Last generated live dataset (96 rows × 25 cols)
-│   │   └── .cache.sqlite                  # Open-Meteo API cache
+│   │   └── combined.csv                   # Last generated live dataset (96 rows × 25 cols)
 │   └── components/
 │       ├── market_manager/IDM_DAM_features.py   # Fetches DAM prices from OREE (oree.com.ua)
-│       ├── weather/weather.py             # Open-Meteo forecast (GTI, temp, radiation)
+│       ├── weather/weather.py             # Open-Meteo forecast (GTI, temp, radiation) — plain requests.Session
 │       ├── grid/synthetic_grid.py         # Synthetic outage schedule generator
 │       ├── load/synthetic_load.py         # Synthetic consumption profile
 │       └── time/time_features.py          # Cyclical time encoding (sin/cos)
@@ -54,26 +54,26 @@ ds_project_demo/
 │       └── dataset_final.csv              # 35 041 rows × 25 cols — column-aligned with live pipeline ✅
 ├── backend/
 │   ├── main.py                            # FastAPI app entry point (CORS enabled)
-│   ├── trained_models/                    # Per-config PPO models saved locally as {config_id}.zip
 │   ├── core/
 │   │   ├── database.py                    # SQLAlchemy engine + session (PostgreSQL)
-│   │   ├── loader.py                      # Bulk-uploads DataFrame → History table
-│   │   └── trainer.py                     # PPO training via SB3; saves locally; writes AgentModels status
-│   ├── models/site.py                     # ORM: User, SystemConfig, History, AgentPredictions, AgentModels
+│   │   └── loader.py                      # Bulk-uploads DataFrame → History table
+│   ├── models/site.py                     # ORM: User, SystemConfig, DefaultStrategy, History, AgentPredictions
 │   ├── repositories/
 │   │   ├── config_repo.py                 # SystemConfig CRUD + upsert
-│   │   ├── model_repo.py                  # AgentModels queries
-│   │   ├── prediction_repo.py             # AgentPredictions bulk insert / delete by config_id
+│   │   ├── prediction_repo.py             # AgentPredictions bulk insert / delete / last SoC query
+│   │   ├── strategy_repo.py               # DefaultStrategy upsert / get / list
 │   │   └── user_repo.py                   # User CRUD
 │   ├── routers/
 │   │   ├── auth.py                        # POST /auth/login, POST /auth/register
-│   │   ├── config.py                      # POST /config/, POST /config/train, GET /config/, GET /config/list
-│   │   └── predictions.py                 # GET /predictions/?config_name=&initial_soc= ✅
-│   ├── schemas/schemas.py                 # Pydantic: SiteConfig, Battery, Inverter, SolarPanel, Grid, User
+│   │   ├── config.py                      # POST /config/, GET /config/, GET /config/list
+│   │   ├── predictions.py                 # GET /predictions/, GET /predictions/default
+│   │   └── strategy.py                    # POST /strategy/, GET /strategy/, GET /strategy/list
+│   ├── schemas/schemas.py                 # Pydantic: SiteConfig, DefaultStrategyConfig, PredictionResponse, …
 │   ├── services/
 │   │   ├── auth_service.py                # login / register logic
-│   │   ├── config_service.py              # save / get / list / trigger_training logic
-│   │   └── prediction_service.py          # full prediction pipeline with model cache
+│   │   ├── config_service.py              # save / get / list configs
+│   │   ├── prediction_service.py          # SAC + default strategy prediction pipelines
+│   │   └── strategy_service.py            # save / get / list default strategies
 │   └── security/security.py              # JWT (HS256), pwdlib Argon2 password hashing
 └── temp/                                  # One-off data-cleaning utility scripts
 ```
@@ -87,8 +87,8 @@ ds_project_demo/
 | Timestep | **15 minutes** (96 steps/day) |
 | Market | Ukrainian **DAM** via [oree.com.ua](https://www.oree.com.ua) |
 | Price unit | UAH / MWh |
-| Sell price | **DAM_Price** UAH/kWh (dynamic, from OREE day-ahead market) |
-| Buy price | **DAM_Price + 3.0 UAH/kWh** (DAM + grid access tax) |
+| Sell price | **DAM_Price / 1000** UAH/kWh (dynamic, from OREE day-ahead market) |
+| Buy price | **DAM_Price / 1000 + 3.0 UAH/kWh** (DAM + grid access tax) |
 | Site location | Lat **48.2904** °N, Lon **25.9324** °E (Chernivtsi, Western Ukraine) |
 | Horizon | Agent operates on **next-day** data assembled each evening (after 14:00 UA time) |
 
@@ -106,9 +106,11 @@ ds_project_demo/
 ### Spaces
 
 ```python
+PRICE_LOOKAHEAD = 4   # steps of future DAM_Price appended to observation
+
 action_space      = Box(low=-1.0, high=1.0, shape=(2,), dtype=float32)
-observation_space = Box(low=-inf, high=inf, shape=(n_features + 1,), dtype=float32)
-# 17 normalized feature cols + SoC → shape (18,)
+observation_space = Box(low=-inf, high=inf, shape=(22,), dtype=float32)
+# 17 normalized feature cols + SoC + 4 price lookahead steps → shape (22,)
 ```
 
 | Action dim | Meaning |
@@ -145,40 +147,51 @@ system_config = {
 
 Charge and discharge use **separate** power limits (`max_batt_charge_power_ts` and `max_batt_discharge_power_ts`).
 
-### Hard SoC Floor (BMS protection)
+### SoC Floors (BMS protection)
 
-When `grid_status == 1` (grid is up), the environment enforces a hard discharge floor at `soc_soft_min`. The agent physically cannot drain below this reserve. During outages (`grid_status == 0`), full discharge to 0 is allowed.
+Two floors are enforced depending on grid state:
 
-This is implemented in Block 2 (discharge):
+| Condition | Floor | Variable |
+|---|---|---|
+| Grid up (`grid_status == 1`) | `soc_soft_min` = `min_reserve / 100` | configurable per site |
+| Grid down (`grid_status == 0`) | `soc_hard_min` = `0.05` | physical BMS absolute floor |
+
+During outages the agent can discharge down to 5% (never to zero) to protect the battery.
+
 ```python
 if grid_status == 1:
     max_drawable = max(0.0, (self.soc - self.soc_soft_min) * self.max_batt_capacity)
 else:
-    max_drawable = self.soc * self.max_batt_capacity
+    max_drawable = max(0.0, (self.soc - self.soc_hard_min) * self.max_batt_capacity)
 ```
+
+### Episode Resets
+
+Episodes are **day-aligned**: each reset picks a random full day from the dataset (`episode_start = day_idx * 96`). This prevents the agent from ever training on a mid-day slice that has no morning solar context.
+
+SoC is randomized uniformly on each reset: `self.soc = uniform(0.0, 1.0)`.
 
 ### Reward Function (9 components, all tracked separately in `info`)
 
 ```
-r_market      = grid_import × (-(DAM_price/1000 + 3.0))  OR  |grid_export| × DAM_price/1000
+r_market      = |grid_export| × (DAM_price/1000)  OR  grid_import × -(DAM_price/1000 + 3.0)
 r_lcos        = -(lcos × |batt_energy_cycled|)
-r_unmet       = -(unmet_load × (DAM_price/1000 + 3.0) × 2)       # if unmet_load > 0
-r_mismatch    = -(2.0 × |grid_commanded - grid_actual|)           # ONLY when net_demand==0 AND grid is up
-r_soc_soft    = -(50.0 × violation²)                              # outside [soc_min, 0.80]
-r_reserve     = -(30.0 × soc_deficit × log1p(outage_remaining_h)) # during outage
+r_unmet       = -(unmet_load × (DAM_price/1000 + 3.0) × 2)          # if unmet_load > 0
+r_mismatch    = 0.0                                                   # disabled (kept in info for compat)
+r_soc_soft    = -(50.0 × violation²)                                 # outside [soc_min, 0.80]
+r_reserve     = -(50.0 × soc_deficit × log1p(outage_remaining_h))   # during outage
 r_preparation = 5.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage
-r_soc_target  = actual_chem_in × buy_price                        # when pre_charge_soc < target_soc
-                                                                  # = avoided future purchase cost
-r_waste       = -(2.0 × lcos × wasted_kWh)                       # discharge that exceeds demand + available grid headroom
+r_soc_target  = actual_chem_in × buy_price                           # when pre_charge_soc < target_soc
+r_waste       = -(10.0 × lcos × wasted_kWh)                         # discharge exceeding demand + grid headroom
 
-reward = sum of all 9 components
+reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalized by capacity
 ```
 
-**r_soc_target design rationale**: rewards storing energy at its avoidance value (`buy_price` per kWh stored), making charging toward the reserve target economically competitive with selling solar surplus. At midday buy_price ≈ 9 UAH/kWh: charging earns ~+9×kWh while r_lcos pays -1.5×kWh, net +7.5 UAH/kWh — stronger signal than solar spot selling.
+**Reward normalization**: dividing by `capacity / 100` keeps reward magnitude consistent across the domain-randomized hardware range (50–250 kWh), preventing large-battery configs from dominating the replay buffer.
 
-**r_mismatch scope**: only fires when `net_demand_after_batt < 1e-6` — i.e. when the agent actually controls the grid outcome. Skipped when environment must force grid import to cover unmet load (the agent's grid action is irrelevant there).
+**r_soc_target rationale**: rewards storing energy at its avoidance value (`buy_price` per kWh stored), making charging economically competitive with selling. At midday buy_price ≈ 9 UAH/kWh: charging earns ~+9×kWh while r_lcos costs -1.5×kWh → net +7.5 UAH/kWh, stronger than spot selling.
 
-**r_waste**: penalizes discharging more than demand + available grid export headroom can absorb. `wasted = batt_output - demand_covered - min(batt_surplus, grid_capacity - solar_surplus)`. Both solar surplus and battery surplus share the same grid capacity.
+**r_waste**: penalizes discharging more than demand + available grid export headroom can absorb.
 
 ### `info` dict (returned by `step()`)
 
@@ -212,9 +225,9 @@ cd /home/denys/PycharmProjects/ds_demo/ds_project_demo && .venv/bin/python envor
 
 ### Key design decisions
 
-**Domain randomization** via `RandomConfigWrapper`: on every `reset()` a new correlated hardware config is sampled. Hardware is sized realistically:
+**Domain randomization** via `RandomConfigWrapper`: on every `reset()` a new correlated hardware config is sampled:
 ```
-capacity  = uniform(50, 500) kWh
+capacity  = uniform(50, 250) kWh
 solar     = capacity × uniform(0.8, 2.0) kWp
 inverter  = solar × uniform(0.8, 1.1) kW
 grid      = inverter × uniform(1.0, 1.5) kW   ← always ≥ inverter
@@ -226,41 +239,38 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 
 **VecNormalize**: obs normalized with `clip_obs=10.0`; reward normalized on train env, raw on eval env.
 
-**SyncNormalizeEvalCallback**: before each eval run, deep-copies `train_env.obs_rms` → `eval_env.obs_rms` so both use the same running stats. Without this, the eval Q-function evaluates against a different observation distribution than it was trained on.
+**SyncNormalizeEvalCallback**: before each eval run, deep-copies `train_env.obs_rms` → `eval_env.obs_rms` so both use the same running stats.
 
-**Eval env**: fixed `DEFAULT_SYSTEM_CONFIG` (200 kWh mid-range) for stable training progress tracking.
+**Eval env**: fixed `DEFAULT_SYSTEM_CONFIG` (150 kWh mid-range) for stable training progress tracking.
 
-**reset() SoC randomization**: `self.soc = uniform(0.0, 1.0)` on each episode reset — ensures the agent sees all SoC levels during training, not just SoC=0.
+**Day-aligned episodes**: `_n_starts = len(df) // episode_len`; `episode_start = day_idx * episode_len`. Prevents mid-day slice training.
 
-**Callback freq scaling**: `save_freq = checkpoint_freq // n_envs` — SB3 callback `_on_step()` fires once per `n_envs` environment steps, so dividing keeps checkpoints at the intended absolute step count.
+**DummyVecEnv chosen over SubprocVecEnv**: env step = 0.11 ms, SubprocVecEnv pipe overhead = ~13 ms → DummyVecEnv is ~7× faster.
 
 ### Configuration
 
 | Parameter | Value |
 |---|---|
 | Algorithm | SAC (MlpPolicy) |
-| Total timesteps | 5 000 000 |
+| Total timesteps | 10 000 000 |
 | Buffer size | 1 000 000 |
 | Batch size | 512 |
 | Learning rate | 3e-4 |
-| Network arch | [512, 512] |
+| Network arch | [256, 256] |
 | n_envs | 32 (DummyVecEnv) |
+| n_eval_episodes | 20 |
 | Gamma | 0.99 |
 | Entropy coef | auto |
-| Checkpoint frequency | every 100 000 env steps |
-| Eval frequency | every 100 000 env steps, 5 episodes |
+| Eval frequency | every 100 000 env steps |
 | Seed | 42 (numpy + SAC) |
 | Device | cuda |
-
-**DummyVecEnv chosen over SubprocVecEnv**: env step = 0.11 ms, SubprocVecEnv pipe overhead = ~13 ms → DummyVecEnv is ~7× faster on this hardware.
 
 ### Outputs
 
 | Path | Contents |
 |---|---|
-| `models/sac_ems.zip` | Final model |
-| `models/best/best_model.zip` | Best checkpoint by eval reward |
-| `models/checkpoints/` | Periodic checkpoints |
+| `models/sac_ems.zip` | Final model (end of training) |
+| `models/best/best_model.zip` | Best checkpoint by eval reward ← **API uses this** |
 | `models/obs_rms.pkl` | VecNormalize running stats — **required for inference** |
 | `logs/tensorboard/` | TensorBoard event files |
 
@@ -277,6 +287,7 @@ model, scalers, obs_rms = load_model_and_scalers(
     model_path='environment/models/best/best_model',
     scalers_path='environment/models/scalers.pkl',
     obs_rms_path='environment/models/obs_rms.pkl',
+    model_cls=SAC,
 )
 
 result = run_inference(
@@ -290,15 +301,36 @@ result = run_inference(
 # result = {'dispatch_plan': [...96 dicts...], 'summary': {...}}
 ```
 
-**`dispatch_plan`** per step includes: `step`, `action_battery`, `action_grid`, `soc`, `target_soc`, `solar_gen_kwh`, `solar_surplus_kwh`, `battery_kwh`, `grid_kwh`, `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`
+**`dispatch_plan`** per step includes: `step`, `action_battery`, `action_grid`, `soc`, `target_soc`, `solar_gen_kwh`, `solar_surplus_kwh`, `battery_kwh`, `grid_kwh`, `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward`, all 9 reward components.
 
-**Model cache**: `load_model_and_scalers()` must be called once at startup. In FastAPI, `prediction_service.py` caches models by `config_id` in `_model_cache` dict.
+**Model cache**: In FastAPI, `prediction_service.py` holds a single `_cached_model: tuple | None` — the global SAC model is loaded once from `best/best_model.zip` and reused for all configs. No per-config training or per-config model files.
 
 **Standalone `__main__` mode** (`python envoriment/inference.py`):
-- Calls `data_combiner.combine()` for live data; falls back to `combined.csv` if DAM unavailable or error
-- `--soc` arg is optional; if omitted reads `envoriment/results/last_soc.txt`, clamped to `min_reserve`; defaults to 0.5 if no file exists
-- Saves final SoC to `last_soc.txt` after each run so the next day starts from real battery state
+- Calls `data_combiner.combine()` for live data; falls back to `combined.csv` if DAM unavailable
+- `--soc` arg is optional; if omitted, queries DB for last prediction SoC (clamped to `min_reserve`); defaults to 0.5 if DB unavailable
 - Args: `--model`, `--scalers`, `--obsrms`, `--config` (JSON), `--output`, `--soc`, `--tilt`, `--azimuth`
+
+---
+
+## Default Strategy (`envoriment/default_strategy.py`)
+
+Rule-based inverter dispatch with no price awareness — reacts only to solar irradiance, grid status, and SoC.
+
+### Configurable parameters (`DefaultStrategyConfig` / `DEFAULT_STRATEGY` dict)
+
+| Parameter | Default | Description |
+|---|---|---|
+| `target_soc` | 0.70 | Charge battery to this SoC before exporting surplus |
+| `max_soc` | 0.95 | Top-up ceiling when solar is abundant |
+| `min_solar_threshold` | 10.0 W/m² | Below this GTI = no meaningful generation |
+| `high_solar_threshold` | 400.0 W/m² | Above this GTI = abundant solar |
+| `solar_surplus_priority` | `charge_first` | `charge_first`: fill to max_soc then export; `sell_first`: export at target_soc |
+| `night_discharge` | True | Discharge battery at night to cover load |
+| `night_sell` | False | Also export battery energy to grid at night |
+| `allow_grid_charging` | False | Buy from grid to charge when SoC < target and no solar |
+| `outage_reserve` | 0.0 | Minimum SoC to preserve during grid outages |
+
+`generate_dispatch_plan(df_raw, df_norm, config, initial_soc, strategy) → dict` returns the same `{'dispatch_plan': [...], 'summary': {...}}` shape as `run_inference()`.
 
 ---
 
@@ -310,7 +342,7 @@ result = run_inference(
 combine(config_id, tilt=None, azimuth=None) → pd.DataFrame  # 96 rows × 25 cols
 ```
 
-Returns `None` if DAM fetch fails. Always check for None before passing to inference.
+Returns `None` if DAM fetch fails. Always check for None before passing to inference. No SQLite cache — uses plain `requests.Session()`.
 
 ### `synthetic_grid.py` — Monthly outage averages (h/day)
 
@@ -334,11 +366,39 @@ Returns `None` if DAM fetch fails. Always check for None before passing to infer
 | GET | `/` | No | Health check |
 | POST | `/auth/register` | No | Create user |
 | POST | `/auth/login` | No | Get JWT token |
-| POST | `/config/` | JWT | Save/update `SiteConfig` (upsert by name — no training triggered) |
-| POST | `/config/train` | JWT | Trigger PPO training for config (skips if model already ready) |
+| POST | `/config/` | JWT | Save/update `SiteConfig` (upsert by name) |
 | GET | `/config/` | JWT | Retrieve named config |
 | GET | `/config/list` | JWT | List all configs for current user |
-| GET | `/predictions/` | JWT | Run inference + store results. Params: `config_name`, `initial_soc` (0–1, default 0.5). Blocked before 14:00 UA time. |
+| POST | `/strategy/` | JWT | Save/update `DefaultStrategyConfig` (upsert by name) |
+| GET | `/strategy/` | JWT | Retrieve named strategy |
+| GET | `/strategy/list` | JWT | List all strategies for current user |
+| GET | `/predictions/` | JWT | Run SAC inference + store results. Params: `config_name`, `initial_soc`. Blocked before 14:00 UA time. |
+| GET | `/predictions/default` | JWT | Run default strategy + return results (not stored). Params: `config_name`, `strategy_name`, `initial_soc`. Blocked before 14:00 UA time. |
+
+### Response Models (Pydantic)
+
+Both prediction endpoints return `PredictionResponse`:
+
+```python
+class DispatchStep(BaseModel):
+    timestamp: str
+    soc: float;  target_soc: float
+    solar_kwh: float;  load_kwh: float
+    battery_kwh: float;  grid_kwh: float
+    unmet_load_kwh: float;  money_earned_ts: float
+    dam_price: float;  grid_status: int;  hours_until_outage: float
+
+class DispatchSummary(BaseModel):
+    total_money_earned: float;  bought_kwh: float;  sold_kwh: float
+    solar_kwh: float;  unmet_load_kwh: float;  lcos_total_uah: float
+    initial_soc: float;  final_soc: float;  steps: int
+
+class PredictionResponse(BaseModel):
+    summary: DispatchSummary
+    dispatch_plan: list[DispatchStep]
+```
+
+Reward components and raw RL actions are stripped from the API response (stored in DB only).
 
 ### SiteConfig Schema → `to_env_dict()` mapping
 
@@ -350,7 +410,7 @@ SiteConfig.to_env_dict() → {
     'grid':    { capacity },
 }
 ```
-`price_to_buy` was removed — buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()`.
+Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — no `price_to_buy` field.
 
 ### Database Models
 
@@ -358,25 +418,20 @@ SiteConfig.to_env_dict() → {
 |---|---|
 | `users` | id, username, email, hashed_password |
 | `system_configs` | id, user_id (FK), config_name, settings (JSONB) |
+| `default_strategies` | id, user_id (FK), strategy_name, settings (JSONB) |
 | `history` | id, user_id (FK), timestamp, data (JSONB) |
-| `predictions` | id, user_id (FK), **config_id (FK)**, date, step, timestamp + 30 physics/reward cols |
-| `agent_models` | id, config_id (FK), status, **algorithm**, trained_at, total_timesteps, storage_path |
+| `predictions` | id, user_id (FK), config_id (FK), date, step, timestamp + 30 physics/reward cols |
 
-`predictions` keyed by `config_id + date` (not `user_id + date`) — multiple configs per user don't collide.
-
-`agent_models.algorithm` stores `"PPO"` or `"SAC"` — used by prediction_service to load correct class.
+`predictions` keyed by `config_id + date` — multiple configs per user don't collide.
 
 ### Prediction Service details
 
-- **Model cache**: `_model_cache: dict[int, tuple]` keyed by `config_id` — model loaded from disk once, reused forever
+- **Global model cache**: `_cached_model: tuple | None` — SAC model loaded once from `environment/models/best/best_model.zip`, reused for all requests. No per-config training or model files.
 - **Timezone**: gate and date calculations use `UTC+2` (Ukrainian time)
 - **Paths**: absolute paths anchored to `Path(__file__).resolve().parent.parent.parent`
-- **`initial_soc`**: passed as query param `GET /predictions/?initial_soc=0.6`, validated `[0.0, 1.0]`; if omitted, read from DB (last step SoC of previous prediction for this config), clamped to `min_reserve` so an outage-drained battery doesn't cascade into the next day
-- **All 30+ `AgentPredictions` columns populated** including reward breakdown and battery/solar flows
-
-### Backend Trainer (`backend/core/trainer.py`)
-
-Triggered by `POST /config/train` only if no ready model exists. Uses **PPO** (200k steps). Separate from the standalone SAC trainer — not unified.
+- **`initial_soc`**: if omitted, read from DB (last step SoC of previous prediction for this config), clamped to `min_reserve`
+- **SAC predictions** (`GET /predictions/`): result stored to `predictions` table (96 rows per run)
+- **Default strategy** (`GET /predictions/default`): result returned only, not stored in DB
 
 ---
 
@@ -385,11 +440,10 @@ Triggered by `POST /config/train` only if no ready model exists. Uses **PPO** (2
 | # | Location | Status | Issue |
 |---|---|---|---|
 | 1 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active |
-| 2 | Backend vs standalone training | ⚠️ Diverged | `backend/core/trainer.py` uses PPO 200k steps; `envoriment/train.py` uses SAC 5M steps + VecNormalize + domain randomization. Not unified. |
-| 3 | `requirements.txt` | ⚠️ Partial | Missing: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
-| 4 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via `last_soc.txt` (standalone) and DB (API), but no live BMS/inverter integration |
-| 5 | No `GET /predictions/history` | ❌ Open | Predictions stored in DB but no endpoint to retrieve them without re-running inference |
-| 6 | Outage over-discharge | ⚠️ Training | Model over-discharges during outages (wastes energy). SoC clamp prevents next-day cascade. Should improve after full 5M-step training via `r_waste` / `r_reserve` penalties. |
+| 2 | `requirements.txt` | ⚠️ Partial | Missing: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
+| 3 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via DB (API) but no live BMS/inverter integration |
+| 4 | No `GET /predictions/history` | ❌ Open | SAC predictions stored in DB but no endpoint to retrieve past days |
+| 5 | SAC training in progress | ⚠️ Training | Model needs full 10M-step run with current env fixes (reward normalization, day-aligned resets, soc_hard_min, 4-step lookahead). Predictions work but quality improves after retraining. |
 
 ---
 

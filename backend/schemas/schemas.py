@@ -100,6 +100,38 @@ class DefaultStrategyResponse(BaseModel):
     settings:      dict
 
 
+class DispatchStep(BaseModel):
+    timestamp:          str
+    soc:                float
+    target_soc:         float
+    solar_kwh:          float
+    load_kwh:           float
+    battery_kwh:        float
+    grid_kwh:           float
+    unmet_load_kwh:     float
+    money_earned_ts:    float
+    dam_price:          float
+    grid_status:        int
+    hours_until_outage: float
+
+
+class DispatchSummary(BaseModel):
+    total_money_earned: float
+    bought_kwh:         float
+    sold_kwh:           float
+    solar_kwh:          float
+    unmet_load_kwh:     float
+    lcos_total_uah:     float
+    initial_soc:        float
+    final_soc:          float
+    steps:              int
+
+
+class PredictionResponse(BaseModel):
+    summary:       DispatchSummary
+    dispatch_plan: list[DispatchStep]
+
+
 class SystemConfigResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

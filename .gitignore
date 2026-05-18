@@ -16,3 +16,4 @@ environment/logs/monitor/
 environment/logs/eval/
 environment/logs/tensorboard/
 environment/results/
+environment/testing/results/

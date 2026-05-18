@@ -31,6 +31,7 @@ class Environment(gym.Env):
         # min_reserve comes in as percentage (e.g. 20), convert to fraction
         self.soc_soft_min         = batt['min_reserve'] / 100
         self.soc_soft_max         = 0.80
+        self.soc_hard_min         = 0.05   # physical BMS cutoff — never crossed regardless of grid status
 
         self.max_grid_capacity    = min(inv['max_power'], grid['capacity'])
         self.max_grid_capacity_ts = self.max_grid_capacity / 4
@@ -45,8 +46,8 @@ class Environment(gym.Env):
         self.curr_step      = 0
         self.episode_start  = 0
 
-        # Number of valid episode start positions (each episode = episode_len steps)
-        self._n_starts = max(1, len(df) - episode_len + 1)
+        # Number of complete day-aligned episodes available
+        self._n_starts = max(1, len(df) // episode_len)
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         n_features = df.shape[1]
@@ -89,8 +90,8 @@ class Environment(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.soc           = float(np.random.uniform(0.0, 1.0))
-        # Random day-aligned start so every episode samples a fresh market/weather context.
-        self.episode_start = int(np.random.randint(0, self._n_starts))
+        day_idx            = int(np.random.randint(0, self._n_starts))
+        self.episode_start = day_idx * self.episode_len
         self.curr_step     = self.episode_start
         return self.get_observe(), {}
 
@@ -139,15 +140,15 @@ class Environment(gym.Env):
 
         else:
             energy_to_draw = abs(battery_energy_delta)
-            # Hard floor: when grid is up, BMS protects the minimum reserve
+            # Grid up: strategic floor (min_reserve). Grid down: physical BMS floor only.
             if grid_status == 1:
                 max_drawable = max(0.0, (self.soc - self.soc_soft_min) * self.max_batt_capacity)
             else:
-                max_drawable = self.soc * self.max_batt_capacity
+                max_drawable = max(0.0, (self.soc - self.soc_hard_min) * self.max_batt_capacity)
             actual_draw    = min(energy_to_draw, max_drawable)
             batt_output_ts = actual_draw * self.batt_efficiency
 
-            self.soc = max(0.0, self.soc - actual_draw / self.max_batt_capacity)
+            self.soc = max(self.soc_hard_min, self.soc - actual_draw / self.max_batt_capacity)
 
             batt_contribution_ts    =  batt_output_ts
             grid_needed_for_batt    =  0.0
@@ -249,7 +250,9 @@ class Environment(gym.Env):
             wasted          = max(0.0, batt_contribution_ts - demand_covered - exportable_batt)
             r_waste         = -10.0 * self.lcos * wasted
 
-        reward = r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste
+        # Normalize by capacity so episodes with different hardware produce comparable gradient scales.
+        # Without this, a 250 kWh episode dominates a 50 kWh one by 5× in the replay buffer.
+        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste) / (self.max_batt_capacity / 100.0)
 
         self.curr_step += 1
         terminated = self.curr_step >= self.episode_start + self.episode_len
