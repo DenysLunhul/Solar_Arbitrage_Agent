@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
@@ -28,3 +30,22 @@ def get_default_predictions(
     user=Depends(get_current_user),
 ):
     return prediction_service.get_default_predictions(db, config_name, user.id, strategy_name, initial_soc)
+
+
+@router.get("/history/dates", response_model=list[str])
+def get_history_dates(
+    config_name: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return prediction_service.get_history_dates(db, config_name, user.id)
+
+
+@router.get("/history", response_model=PredictionResponse)
+def get_history(
+    config_name: str,
+    date: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return prediction_service.get_history(db, config_name, user.id, date)

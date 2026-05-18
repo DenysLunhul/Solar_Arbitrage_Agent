@@ -34,3 +34,33 @@ def delete_for_date(db: Session, config_id: int, target_date: date) -> None:
 def bulk_create(db: Session, rows: list[AgentPredictions]) -> None:
     db.add_all(rows)
     db.commit()
+
+
+def get_by_config_and_date(db: Session, config_id: int, target_date: date) -> list[AgentPredictions]:
+    return (
+        db.query(AgentPredictions)
+        .filter(AgentPredictions.config_id == config_id, AgentPredictions.date == target_date)
+        .order_by(AgentPredictions.step)
+        .all()
+    )
+
+
+def get_available_dates(db: Session, config_id: int) -> list[date]:
+    rows = (
+        db.query(AgentPredictions.date)
+        .filter(AgentPredictions.config_id == config_id)
+        .distinct()
+        .order_by(AgentPredictions.date.desc())
+        .all()
+    )
+    return [r.date for r in rows]
+
+
+def get_latest_date(db: Session, config_id: int) -> date | None:
+    row = (
+        db.query(AgentPredictions.date)
+        .filter(AgentPredictions.config_id == config_id)
+        .order_by(AgentPredictions.date.desc())
+        .first()
+    )
+    return row.date if row else None

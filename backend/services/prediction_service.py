@@ -1,5 +1,5 @@
 import pickle
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -25,6 +25,21 @@ UA_TZ = timezone(timedelta(hours=2))
 _cached_model: tuple | None = None
 
 
+def _check_time_gate() -> None:
+    now = datetime.now(UA_TZ)
+    if now.hour < 14:
+        available_at = now.replace(hour=14, minute=0, second=0, microsecond=0)
+        retry_in = int((available_at - now).total_seconds() / 60)
+        raise HTTPException(
+            status_code=status.HTTP_425_TOO_EARLY,
+            detail={
+                "message": "DAM prices for tomorrow are not yet published.",
+                "available_after": "14:00 UTC+2",
+                "retry_after_minutes": retry_in,
+            },
+        )
+
+
 def _get_model() -> tuple:
     global _cached_model
     if _cached_model is None:
@@ -38,11 +53,7 @@ def _get_model() -> tuple:
 
 
 def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: float | None) -> dict:
-    if datetime.now(UA_TZ).hour < 14:
-        raise HTTPException(
-            status_code=status.HTTP_425_TOO_EARLY,
-            detail="DAM data for tomorrow is not yet available. Please call after 14:00.",
-        )
+    _check_time_gate()
 
     raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
     if raw_config is None:
@@ -120,11 +131,7 @@ def _build_response(result: dict, df_raw: pd.DataFrame) -> dict:
 
 
 def get_default_predictions(db, config_name: str, user_id: int, strategy_name: str, initial_soc: float | None) -> dict:
-    if datetime.now(UA_TZ).hour < 14:
-        raise HTTPException(
-            status_code=status.HTTP_425_TOO_EARLY,
-            detail="DAM data for tomorrow is not yet available. Please call after 14:00.",
-        )
+    _check_time_gate()
 
     raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
     if raw_config is None:
@@ -162,6 +169,62 @@ def get_default_predictions(db, config_name: str, user_id: int, strategy_name: s
     )
 
     return _build_response(result, df_raw)
+
+
+def get_history(
+    db: Session, config_name: str, user_id: int, target_date: date | None
+) -> dict:
+    raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
+    if raw_config is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Config not found")
+
+    if target_date is None:
+        target_date = prediction_repo.get_latest_date(db, raw_config.id)
+        if target_date is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No predictions stored for this config")
+
+    rows = prediction_repo.get_by_config_and_date(db, raw_config.id, target_date)
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No predictions for {target_date}")
+
+    steps = [
+        {
+            "timestamp":          str(r.timestamp),
+            "soc":                r.soc,
+            "target_soc":         r.target_soc,
+            "solar_kwh":          r.solar_kwh,
+            "load_kwh":           r.load_kwh,
+            "battery_kwh":        r.battery_kwh,
+            "grid_kwh":           r.grid_kwh,
+            "unmet_load_kwh":     r.unmet_load_kwh,
+            "money_earned_ts":    r.money_earned_ts,
+            "dam_price":          r.dam_price,
+            "grid_status":        r.grid_status,
+            "hours_until_outage": r.hours_until_outage,
+        }
+        for r in rows
+    ]
+
+    summary = {
+        "total_money_earned": round(sum(r.money_earned_ts or 0 for r in rows), 2),
+        "bought_kwh":         round(sum(r.grid_kwh for r in rows if (r.grid_kwh or 0) > 0), 3),
+        "sold_kwh":           round(sum(abs(r.grid_kwh) for r in rows if (r.grid_kwh or 0) < 0), 3),
+        "solar_kwh":          round(sum(r.solar_kwh or 0 for r in rows), 3),
+        "unmet_load_kwh":     round(sum(r.unmet_load_kwh or 0 for r in rows), 4),
+        "lcos_total_uah":     round(sum(r.lcos_cost or 0 for r in rows), 3),
+        "initial_soc":        rows[0].soc,
+        "final_soc":          rows[-1].soc,
+        "steps":              len(rows),
+    }
+
+    return {"summary": summary, "dispatch_plan": steps}
+
+
+def get_history_dates(db: Session, config_name: str, user_id: int) -> list[str]:
+    raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
+    if raw_config is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Config not found")
+    return [str(d) for d in prediction_repo.get_available_dates(db, raw_config.id)]
 
 
 def _build_rows(
