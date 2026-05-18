@@ -1,13 +1,12 @@
 from datetime import date, timedelta
 import openmeteo_requests
+import requests
 import pandas as pd
-import requests_cache
 from retry_requests import retry
 
 
 def fetch_weather(today: date, tilt: float = 35, azimuth: float = 0) -> pd.DataFrame:
-	cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
-	retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
+	retry_session = retry(requests.Session(), retries = 5, backoff_factor = 0.2)
 	openmeteo = openmeteo_requests.Client(session = retry_session)
 
 	tomorrow = today + timedelta(days=1)

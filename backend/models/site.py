@@ -20,6 +20,14 @@ class SystemConfig(Base):
     settings    = Column(JSONB)
 
 
+class DefaultStrategy(Base):
+    __tablename__ = "default_strategies"
+    id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(Integer, ForeignKey("users.id"), index=True)
+    strategy_name = Column(String)
+    settings      = Column(JSONB)
+
+
 class History(Base):
     __tablename__ = "history"
     id        = Column(Integer, primary_key=True, index=True)

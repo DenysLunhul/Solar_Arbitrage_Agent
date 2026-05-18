@@ -1,0 +1,198 @@
+"""
+inverter_dispatch.py
+====================
+Dispatch plan based on primitive hybrid inverter logic.
+No price awareness or outage forecasting — reacts only to solar irradiance,
+grid presence, and current SoC.
+"""
+
+import argparse
+import numpy as np
+import pandas as pd
+
+try:
+    from environment import Environment
+except ImportError:
+    from environment.environment import Environment
+
+DEFAULT_SYSTEM_CONFIG = {
+    'battery': {
+        'capacity_kwh':        200.0,
+        'max_charge_power':    150,
+        'max_discharge_power': 150,
+        'efficiency':          0.95,
+        'lcos':                1.5,
+        'min_reserve':         20,
+    },
+    'solar': {
+        'peak_power':  150.0,
+        'efficiency':  0.23,
+    },
+    'inverter': {
+        'max_power':    100.0,
+        'efficiency': 0.95,
+    },
+    'grid': {
+        'capacity': 150.0,
+    },
+}
+
+
+DEFAULT_STRATEGY = {
+    'target_soc':             0.70,   # charge to this SoC before selling surplus
+    'max_soc':                0.95,   # top-up ceiling during abundant solar
+    'min_solar_threshold':    10.0,   # W/m² — below this = no meaningful generation
+    'high_solar_threshold':   400.0,  # W/m² — above this = abundant solar
+    # "charge_first": fill battery before exporting surplus
+    # "sell_first":   export solar immediately, charge only when battery is below target
+    'solar_surplus_priority': 'charge_first',
+    'night_discharge':        True,   # discharge battery at night to cover load
+    'night_sell':             False,  # also export battery energy to grid at night
+    'allow_grid_charging':    False,  # charge battery from grid when SoC < target
+    'outage_reserve':         0.0,    # keep this SoC even during outages (0 = discharge fully)
+}
+
+
+def inverter_action(row: pd.Series, soc: float, strategy: dict | None = None) -> np.ndarray:
+    """Rule-based hybrid inverter dispatch driven by a user-configurable strategy dict."""
+    if strategy is None:
+        strategy = DEFAULT_STRATEGY
+
+    gti         = float(row['Global_tilted_irradiance_instant'])
+    grid_status = int(row['Grid'])
+
+    target_soc      = strategy.get('target_soc',             DEFAULT_STRATEGY['target_soc'])
+    max_soc         = strategy.get('max_soc',                 DEFAULT_STRATEGY['max_soc'])
+    min_solar       = strategy.get('min_solar_threshold',     DEFAULT_STRATEGY['min_solar_threshold'])
+    high_solar      = strategy.get('high_solar_threshold',    DEFAULT_STRATEGY['high_solar_threshold'])
+    sol_priority    = strategy.get('solar_surplus_priority',  DEFAULT_STRATEGY['solar_surplus_priority'])
+    night_discharge = strategy.get('night_discharge',         DEFAULT_STRATEGY['night_discharge'])
+    night_sell      = strategy.get('night_sell',              DEFAULT_STRATEGY['night_sell'])
+    grid_charging   = strategy.get('allow_grid_charging',     DEFAULT_STRATEGY['allow_grid_charging'])
+    outage_reserve  = strategy.get('outage_reserve',          DEFAULT_STRATEGY['outage_reserve'])
+
+    # ── Outage: grid is down ──────────────────────────────────────────────────
+    if grid_status == 0:
+        if soc > outage_reserve:
+            return np.array([-1.0, 0.0], dtype=np.float32)   # discharge to serve load
+        return np.array([0.0, 0.0], dtype=np.float32)          # reserve floor reached, idle
+
+    # ── Grid is up ───────────────────────────────────────────────────────────
+    has_solar      = gti > min_solar
+    abundant_solar = gti > high_solar
+
+    if has_solar:
+        if soc < target_soc:
+            # Always fill battery to target before anything else
+            return np.array([1.0, 0.0], dtype=np.float32)
+
+        if sol_priority == 'charge_first':
+            # Keep charging toward max_soc whenever solar is present, export the rest
+            if soc < max_soc:
+                return np.array([1.0, 1.0], dtype=np.float32)  # charge + export surplus
+            return np.array([0.0, 1.0], dtype=np.float32)       # full, export only
+
+        else:  # sell_first
+            # Battery is at target — stop charging, export everything
+            return np.array([0.0, 1.0], dtype=np.float32)
+
+    else:
+        # Night / low irradiance
+        if night_discharge:
+            grid_act = 1.0 if night_sell else 0.0
+            return np.array([-1.0, grid_act], dtype=np.float32)
+        if grid_charging and soc < target_soc:
+            return np.array([1.0, -1.0], dtype=np.float32)     # buy from grid to charge
+        return np.array([0.0, 0.0], dtype=np.float32)           # idle
+
+
+def generate_dispatch_plan(
+    df_raw:      pd.DataFrame,
+    df_norm:     pd.DataFrame,
+    config:      dict,
+    initial_soc: float,
+    strategy:    dict | None = None,
+    output_file: str | None = None,
+) -> dict:
+    """
+    Run the default strategy over df_raw and return a result dict compatible
+    with run_inference() output: {'dispatch_plan': [...], 'summary': {...}}.
+    Optionally saves a CSV if output_file is provided.
+    """
+    env = Environment(df_raw=df_raw, df=df_norm, system_config=config)
+    env.reset()
+    env.soc = initial_soc
+
+    dispatch_plan = []
+
+    while True:
+        curr_step = env.curr_step
+        row = df_raw.iloc[curr_step]
+
+        action = inverter_action(row, env.soc, strategy)
+        _, _, terminated, truncated, info = env.step(action)
+
+        dispatch_plan.append({
+            'step':              curr_step,
+            'action_battery':    round(float(action[0]), 4),
+            'action_grid':       round(float(action[1]), 4),
+            'soc':               round(float(info['soc']), 4),
+            'solar_gen_kwh':     round(float(info['solar_gen_ts_kwh']), 4),
+            'solar_surplus_kwh': round(float(info['solar_surplus_kwh']), 4),
+            'battery_kwh':       round(float(info['battery_kwh']), 4),
+            'grid_kwh':          round(float(info['actual_grid_kwh']), 4),
+            'unmet_load_kwh':    round(float(info['unmet_load_kwh']), 4),
+            'lcos_cost':         round(float(info['lcos_cost']), 4),
+            'money_earned_ts':   round(float(info['money_earned_ts']), 4),
+        })
+
+        if terminated or truncated:
+            break
+
+    summary = {
+        'total_money_earned': round(sum(s['money_earned_ts'] for s in dispatch_plan), 2),
+        'bought_kwh':         round(sum(s['grid_kwh'] for s in dispatch_plan if s['grid_kwh'] > 0), 3),
+        'sold_kwh':           round(sum(abs(s['grid_kwh']) for s in dispatch_plan if s['grid_kwh'] < 0), 3),
+        'solar_kwh':          round(sum(s['solar_gen_kwh'] for s in dispatch_plan), 3),
+        'unmet_load_kwh':     round(sum(s['unmet_load_kwh'] for s in dispatch_plan), 4),
+        'lcos_total_uah':     round(sum(s['lcos_cost'] for s in dispatch_plan), 3),
+        'initial_soc':        round(initial_soc, 3),
+        'final_soc':          dispatch_plan[-1]['soc'] if dispatch_plan else initial_soc,
+        'steps':              len(dispatch_plan),
+    }
+
+    if output_file:
+        pd.DataFrame(dispatch_plan).to_csv(output_file, index=False)
+        print(f"Saved {len(dispatch_plan)} steps → {output_file}")
+
+    return {'dispatch_plan': dispatch_plan, 'summary': summary}
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--raw',     default='dataset_final.csv')
+    parser.add_argument('--norm',    default='dataset_normalized.csv')
+    parser.add_argument('--soc',     type=float, default=0.5)
+    parser.add_argument('--days',    type=int,   default=1)
+    parser.add_argument('--out',     default='results/dispatch_plan_default.csv')
+    args = parser.parse_args()
+
+    print("Loading data...")
+    df_raw  = pd.read_csv(args.raw)
+    df_norm = pd.read_csv(args.norm)
+
+    if args.days is not None:
+        df_raw  = df_raw.iloc[:args.days * 96].reset_index(drop=True)
+        df_norm = df_norm.iloc[:args.days * 96].reset_index(drop=True)
+
+    print(f"Data: {len(df_raw)} rows ({len(df_raw)//96} days)")
+
+    result = generate_dispatch_plan(
+        df_raw=df_raw,
+        df_norm=df_norm,
+        config=DEFAULT_SYSTEM_CONFIG,
+        initial_soc=args.soc,
+        output_file=args.out,
+    )
+    print(f"Total earned: {result['summary']['total_money_earned']} UAH")
+    print(f"Final SoC:    {result['summary']['final_soc']:.3f}")

@@ -6,10 +6,7 @@ from datetime import date, timedelta
 def fetch_load(today: date) -> pd.DataFrame:
     tomorrow = today + timedelta(days=1)
     day_of_week = tomorrow.isoweekday()  # 1=Mon … 7=Sun
-
-    # Seed from date for reproducible results per day
     rng = np.random.default_rng(int(tomorrow.strftime('%Y%m%d')))
-
     steps = [{"Hour": h, "Minute": m} for h in range(24) for m in [0, 15, 30, 45]]
     df = pd.DataFrame(steps)
 

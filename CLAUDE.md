@@ -271,21 +271,21 @@ View training: `tensorboard --logdir envoriment/logs/tensorboard/`
 ## Inference Module (`envoriment/inference.py`)
 
 ```python
-from envoriment.inference import load_model_and_scalers, run_inference
+from environment.inference import load_model_and_scalers, run_inference
 
 model, scalers, obs_rms = load_model_and_scalers(
-    model_path='envoriment/models/best/best_model',
-    scalers_path='envoriment/models/scalers.pkl',
-    obs_rms_path='envoriment/models/obs_rms.pkl',
+    model_path='environment/models/best/best_model',
+    scalers_path='environment/models/scalers.pkl',
+    obs_rms_path='environment/models/obs_rms.pkl',
 )
 
 result = run_inference(
     df_raw=df_raw,
-    system_config=system_config,   # from SiteConfig.to_env_dict()
+    system_config=system_config,  # from SiteConfig.to_env_dict()
     model=model,
     scalers=scalers,
     obs_rms=obs_rms,
-    initial_soc=0.6,               # real battery level from BMS
+    initial_soc=0.6,  # real battery level from BMS
 )
 # result = {'dispatch_plan': [...96 dicts...], 'summary': {...}}
 ```

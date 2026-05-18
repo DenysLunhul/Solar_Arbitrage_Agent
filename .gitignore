@@ -7,17 +7,12 @@ __pycache__/
 .env
 .claude
 
-# SQLite caches
-*.cache.sqlite
-.cache.sqlite
-
 # Generated data / live pipeline outputs
 data_providers/orchestrator/combined.csv
-data_providers/orchestrator/.cache.sqlite
 
 # Training artifacts (large binaries / auto-generated logs)
-envoriment/models/checkpoints/
-envoriment/logs/monitor/
-envoriment/logs/eval/
-envoriment/logs/tensorboard/
-envoriment/results/
+environment/models/checkpoints/
+environment/logs/monitor/
+environment/logs/eval/
+environment/logs/tensorboard/
+environment/results/

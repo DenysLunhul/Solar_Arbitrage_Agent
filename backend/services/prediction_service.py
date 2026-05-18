@@ -10,7 +10,7 @@ from backend.models.site import AgentPredictions
 from backend.repositories import config_repo, model_repo, prediction_repo
 from backend.schemas.schemas import SiteConfig
 from data_providers.orchestrator.data_combiner import combine
-from envoriment.inference import load_model_and_scalers, run_inference
+from environment.inference import load_model_and_scalers, run_inference
 
 _BASE_DIR    = Path(__file__).resolve().parent.parent.parent
 SCALERS_PATH = str(_BASE_DIR / "envoriment" / "models" / "scalers.pkl")

@@ -6,13 +6,8 @@ import pandas as pd
 import gymnasium as gym
 
 from stable_baselines3 import SAC
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import (
-    CheckpointCallback,
-    EvalCallback,
-    CallbackList,
-)
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from environment import Environment
@@ -23,12 +18,11 @@ CONFIG = {
     'dataset_raw_path': 'dataset_final.csv',
     'scalers_path':    'models/scalers.pkl',
     'model_save_path': 'models/sac_ems',
-    'checkpoint_dir':  'models/checkpoints/',
     'tensorboard_dir': 'logs/tensorboard/',
     'monitor_dir':     'logs/monitor/',
 
     'total_timesteps': 10_000_000,
-    'checkpoint_freq': 100_000,
+    'eval_freq':       100_000,
     'log_interval':    100_000,  # large value — suppress SB3 default episode logging
     'n_envs':          32,       # DummyVecEnv: no IPC overhead, env step ~0.11 ms each
 
@@ -42,7 +36,7 @@ CONFIG = {
         'tau':             0.005,
         'ent_coef':        'auto',
         'policy_kwargs': {
-            'net_arch': [512, 512],  # 114-dim obs needs more capacity than 256×256
+            'net_arch': [256, 256],
         },
         'verbose': 0,
         'seed':    42,
@@ -53,22 +47,22 @@ CONFIG = {
 
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
-        'capacity_kwh':        200.0,
-        'max_charge_power':    100.0,  # C/2
-        'max_discharge_power': 100.0,  # C/2
+        'capacity_kwh':        150.0,
+        'max_charge_power':     75.0,  # C/2
+        'max_discharge_power':  75.0,  # C/2
         'efficiency':          0.95,
         'lcos':                1.5,
         'min_reserve':         20,
     },
     'solar': {
-        'peak_power':  250.0,
+        'peak_power':  200.0,
         'efficiency':  0.2,
     },
     'inverter': {
-        'max_power': 200.0,
+        'max_power': 180.0,
     },
     'grid': {
-        'capacity': 250.0,
+        'capacity': 220.0,
     },
 }
 
@@ -84,7 +78,7 @@ class RandomConfigWrapper(gym.Wrapper):
         super().__init__(env)
 
     def _sample_config(self) -> dict:
-        capacity      = float(np.random.uniform(50, 500))
+        capacity      = float(np.random.uniform(50, 250))
         solar_peak    = float(capacity * np.random.uniform(0.8, 2.0))
         inverter_max  = float(solar_peak * np.random.uniform(0.8, 1.1))
         grid_capacity = float(inverter_max * np.random.uniform(1.0, 1.5))
@@ -172,7 +166,6 @@ def make_model(train_env):
 
     os.makedirs('models', exist_ok=True)
     os.makedirs(CONFIG['tensorboard_dir'], exist_ok=True)
-    os.makedirs(CONFIG['checkpoint_dir'], exist_ok=True)
 
     model = SAC(
         policy='MlpPolicy',
@@ -231,17 +224,8 @@ class SyncNormalizeEvalCallback(EvalCallback):
 
 
 def make_callbacks(train_env, eval_env):
-    # SB3 callback freq counts _on_step() calls, not env steps.
-    # With VecEnv each call covers n_envs steps, so divide to keep
-    # checkpoints at the intended absolute step count.
-    freq = max(CONFIG['checkpoint_freq'] // CONFIG['n_envs'], 1)
-
-    checkpoint_cb = CheckpointCallback(
-        save_freq=freq,
-        save_path=CONFIG['checkpoint_dir'],
-        name_prefix='sac_ems',
-        verbose=1,
-    )
+    # SB3 _on_step() fires once per n_envs steps — divide to keep freq at intended absolute step count.
+    freq = max(CONFIG['eval_freq'] // CONFIG['n_envs'], 1)
 
     eval_cb = SyncNormalizeEvalCallback(
         train_env=train_env,
@@ -256,7 +240,7 @@ def make_callbacks(train_env, eval_env):
 
     stats_cb = StatsCallback(log_every=100_000)
 
-    return CallbackList([checkpoint_cb, eval_cb, stats_cb])
+    return CallbackList([eval_cb, stats_cb])
 
 
 def train(model, callbacks):

@@ -6,6 +6,8 @@ import pandas as pd
 
 class Environment(gym.Env):
 
+    PRICE_LOOKAHEAD = 4  # 1-hour price window fed to the network
+
     def __init__(self, df_raw: pd.DataFrame, df: pd.DataFrame, system_config: dict, episode_len: int = 96):
         super().__init__()
 
@@ -48,8 +50,8 @@ class Environment(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         n_features = df.shape[1]
-        # 17 normalized features + SoC + episode_len remaining DAM prices (price profile lookahead)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(n_features + 1 + episode_len,), dtype=np.float32)
+        # 17 normalized features + SoC + PRICE_LOOKAHEAD next DAM prices (1-hour horizon)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(n_features + 1 + self.PRICE_LOOKAHEAD,), dtype=np.float32)
 
     def _calc_solar_generation_ts(self, gti_w_m2: float) -> float:
         power_w       = gti_w_m2 * self.solar_efficiency * self.panel_area_m2
@@ -76,11 +78,10 @@ class Environment(gym.Env):
         row = self.df.iloc[idx]
         base = np.append(row.values, self.soc)
 
-        # Remaining episode DAM prices from current step onward.
-        # episode_start marks the beginning of this 96-step day; zeros pad elapsed slots.
-        episode_end = self.episode_start + self.episode_len
-        remaining   = self.df['DAM_Price'].iloc[idx:episode_end].values
-        price_vec   = np.zeros(self.episode_len, dtype=np.float32)
+        # Next PRICE_LOOKAHEAD DAM prices (1-hour horizon); zeros pad at end of episode.
+        lookahead_end = idx + self.PRICE_LOOKAHEAD
+        remaining     = self.df['DAM_Price'].iloc[idx:lookahead_end].values
+        price_vec     = np.zeros(self.PRICE_LOOKAHEAD, dtype=np.float32)
         price_vec[:len(remaining)] = remaining
 
         return np.concatenate([base, price_vec]).astype(np.float32)
@@ -208,14 +209,10 @@ class Environment(gym.Env):
         if unmet_load > 0:
             r_unmet = -unmet_load * buy_price * 2
 
-        # Mismatch penalty only when agent controlled the grid outcome; skipped when env forces
-        # import to cover unmet load (grid_action is irrelevant there, penalising it isn't trainable).
-        if grid_status == 1 and net_demand_after_batt < 1e-6:
-            mismatch   = abs(grid_power_ts - actual_grid_ts)
-            r_mismatch = -2.0 * mismatch
-        else:
-            mismatch   = 0.0
-            r_mismatch = 0.0
+        # Mismatch removed: r_market already penalises/rewards actual grid transactions;
+        # a separate mismatch term dominated the gradient without teaching new behaviour.
+        mismatch   = 0.0
+        r_mismatch = 0.0
 
         # Coefficient 50.0 — at SoC=0: -50×0.04=-2.0/step; over 90 steps ≈125 UAH,
         # exceeding one full-cycle LCOS, giving a clear incentive to recharge.
@@ -227,7 +224,7 @@ class Environment(gym.Env):
         if grid_status == 0 and outage_remaining_h > 0:
             soc_deficit = max(0.0, target_soc - self.soc)
             if soc_deficit > 0:
-                r_reserve = -30.0 * soc_deficit * np.log1p(outage_remaining_h)
+                r_reserve = -50.0 * soc_deficit * np.log1p(outage_remaining_h)
 
         if grid_status == 1 and 0 < hours_until_outage <= 3.0:
             urgency       = np.exp(-0.5 * hours_until_outage)
@@ -250,7 +247,7 @@ class Environment(gym.Env):
             grid_headroom   = max(0.0, self.max_grid_capacity_ts - remaining_solar_surplus)
             exportable_batt = min(batt_export_possible, grid_headroom)
             wasted          = max(0.0, batt_contribution_ts - demand_covered - exportable_batt)
-            r_waste         = -2.0 * self.lcos * wasted
+            r_waste         = -10.0 * self.lcos * wasted
 
         reward = r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste
 

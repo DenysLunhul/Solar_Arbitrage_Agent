@@ -7,8 +7,8 @@ from stable_baselines3 import PPO
 from backend.core.database import SessionLocal
 from backend.models.site import AgentModels, SystemConfig
 from backend.schemas.schemas import SiteConfig
-from envoriment.environment import Environment
-from envoriment.normalize import normalize_dataset
+from environment.environment import Environment
+from environment.normalize import normalize_dataset
 
 DATASET_PATH            = "datasets/dataset_v10/dataset_final.csv"
 DATASET_NORMALIZED_PATH = "envoriment/dataset_normalized.csv"

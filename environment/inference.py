@@ -9,8 +9,8 @@ try:
     from environment import Environment
     from normalize import normalize_row
 except ImportError:
-    from envoriment.environment import Environment
-    from envoriment.normalize import normalize_row
+    from environment.environment import Environment
+    from environment.normalize import normalize_row
 
 
 def load_model_and_scalers(
@@ -146,8 +146,8 @@ def run_inference(
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
         'capacity_kwh':        250.0,
-        'max_charge_power':    150.0,  # C/2
-        'max_discharge_power': 150.0,  # C/2
+        'max_charge_power':    150.0,
+        'max_discharge_power': 150.0,
         'efficiency':          0.95,
         'lcos':                1.5,
         'min_reserve':         20,
@@ -165,12 +165,34 @@ DEFAULT_SYSTEM_CONFIG = {
 }
 
 
+def _fetch_soc_from_db(min_reserve: float) -> tuple[float, str]:
+    """Try to get the last SoC from the database. Returns (soc, source_label)."""
+    try:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from backend.core.database import SessionLocal
+        from backend.repositories.prediction_repo import get_latest_soc
+        db = SessionLocal()
+        try:
+            persisted = get_latest_soc(db)
+        finally:
+            db.close()
+        if persisted is not None:
+            soc = max(float(persisted), min_reserve)
+            label = f"from DB (clamped to {soc:.3f})" if soc > persisted else "from DB"
+            return soc, label
+    except Exception as e:
+        print(f"DB unavailable ({e}) — using default SoC")
+    return min_reserve, "default (DB unavailable or empty)"
+
+
 if __name__ == '__main__':
     import json
     from pathlib import Path
 
     _ROOT    = Path(__file__).resolve().parent.parent
-    _ENV_DIR = _ROOT / 'envoriment'
+    _ENV_DIR = _ROOT / 'environment'
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--model',   default=str(_ENV_DIR / 'models' / 'best' / 'best_model.zip'))
@@ -178,7 +200,7 @@ if __name__ == '__main__':
     parser.add_argument('--obsrms',  default=str(_ENV_DIR / 'models' / 'obs_rms.pkl'))
     parser.add_argument('--config',  default=None, help='JSON file with system_config')
     parser.add_argument('--output',  default=str(_ENV_DIR / 'results' / 'dispatch_plan.csv'))
-    parser.add_argument('--soc',     type=float, default=None, help='Initial SoC (0-1). Defaults to last run\'s final SoC, then 0.5.')
+    parser.add_argument('--soc',     type=float, default=None, help='Initial SoC (0-1). Overrides DB lookup.')
     parser.add_argument('--tilt',    type=float, default=35.0, help='Solar panel tilt (degrees)')
     parser.add_argument('--azimuth', type=float, default=0.0,  help='Solar panel azimuth (degrees)')
     args = parser.parse_args()
@@ -193,8 +215,6 @@ if __name__ == '__main__':
 
     model, scalers, obs_rms = load_model_and_scalers(args.model, args.scalers, args.obsrms)
 
-    # Always fetch fresh data from the orchestrator; fall back to cached combined.csv
-    # only when DAM prices are unavailable (before 14:00 or network error).
     _COMBINED = _ROOT / 'data_providers' / 'orchestrator' / 'combined.csv'
     try:
         from data_providers.orchestrator.data_combiner import combine
@@ -212,21 +232,13 @@ if __name__ == '__main__':
     df = df.iloc[:96].reset_index(drop=True)
     print(f"Date: {str(df['timestamp'].iloc[0])[:10]}")
 
-    _SOC_FILE = _ENV_DIR / 'results' / 'last_soc.txt'
+    min_reserve = system_config['battery']['min_reserve'] / 100
     if args.soc is not None:
         initial_soc = args.soc
         print(f"SoC:  {initial_soc:.3f} (from --soc argument)")
-    elif _SOC_FILE.exists():
-        persisted_soc = float(_SOC_FILE.read_text().strip())
-        min_reserve = system_config['battery']['min_reserve'] / 100
-        initial_soc = max(persisted_soc, min_reserve)
-        if initial_soc > persisted_soc:
-            print(f"SoC:  {initial_soc:.3f} (clamped from {persisted_soc:.3f} — outage left battery below floor)")
-        else:
-            print(f"SoC:  {initial_soc:.3f} (from previous run's final SoC)")
     else:
-        initial_soc = 0.5
-        print(f"SoC:  {initial_soc:.3f} (default — no previous run found)")
+        initial_soc, label = _fetch_soc_from_db(min_reserve)
+        print(f"SoC:  {initial_soc:.3f} ({label})")
     print()
 
     result = run_inference(
@@ -247,11 +259,5 @@ if __name__ == '__main__':
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(result['dispatch_plan']).to_csv(output_path, index=False)
-
-    # Persist final SoC so the next day's run picks it up automatically.
-    final_soc = result['summary']['final_soc']
-    _SOC_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _SOC_FILE.write_text(str(final_soc))
     print(f"\nDispatch plan → {output_path}")
-    print(f"Final SoC {final_soc:.3f} saved → next run will start here")
     print(pd.DataFrame(result['dispatch_plan']).head(10).to_string())

@@ -28,7 +28,7 @@ from pathlib import Path
 
 os.chdir(Path(__file__).resolve().parent)
 
-DATA_PATH    = Path('dataset_final.csv')
+DATA_PATH    = Path('../environment/dataset_final.csv')
 ALSO_UPDATE  = Path('../datasets/dataset_v10/dataset_final.csv')
 
 NIGHT_BASE    = 20.0   # kW  (00:00-07:45 and 19:00-23:45)
