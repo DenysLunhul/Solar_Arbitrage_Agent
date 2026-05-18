@@ -59,10 +59,14 @@ class Environment(gym.Env):
         energy_kwh_ts = (power_w / 1000.0) / 4
         return max(0.0, energy_kwh_ts)
 
+    # Economic buffer SoC to maintain on days with no forecasted outage.
+    # Gives r_soc_target something to reward and r_soc_below a continuous signal.
+    DEFAULT_SOC_TARGET = 0.50
+
     def _calc_target_soc(self, next_outage_h: float, curr_load_kw: float, gti_w_m2: float) -> float:
         """Dynamic target SoC: energy needed to survive the upcoming outage, clipped to [soc_soft_min, soc_soft_max]."""
         if next_outage_h <= 0:
-            return self.soc_soft_min
+            return max(self.soc_soft_min, self.DEFAULT_SOC_TARGET)
 
         energy_load  = curr_load_kw * next_outage_h
         solar_per_hour = self._calc_solar_generation_ts(gti_w_m2) * 4
@@ -215,12 +219,18 @@ class Environment(gym.Env):
         mismatch   = 0.0
         r_mismatch = 0.0
 
-        # Coefficient 50.0 — at SoC=0: -50×0.04=-2.0/step; over 90 steps ≈125 UAH,
-        # exceeding one full-cycle LCOS, giving a clear incentive to recharge.
+        # Hard boundary violations — large coefficient keeps SoC inside [soc_soft_min, soc_soft_max].
         if self.soc < self.soc_soft_min:
             r_soc_soft -= 50.0 * ((self.soc_soft_min - self.soc) ** 2)
         if self.soc > self.soc_soft_max:
             r_soc_soft -= 50.0 * ((self.soc - self.soc_soft_max) ** 2)
+
+        # Continuous below-target penalty (grid up only): fires every step when SoC < target_soc.
+        # Without this, target_soc = DEFAULT_SOC_TARGET has no gradient when the agent never charges.
+        # Coefficient 5.0: at SoC=0.20, target=0.50 → -5×0.09=-0.45/step ≈ -29 over a full night,
+        # comparable to the cost savings from discharging stored energy instead of buying from grid.
+        if grid_status == 1 and self.soc < target_soc:
+            r_soc_soft -= 5.0 * ((target_soc - self.soc) ** 2)
 
         if grid_status == 0 and outage_remaining_h > 0:
             soc_deficit = max(0.0, target_soc - self.soc)
