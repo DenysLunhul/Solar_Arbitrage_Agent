@@ -51,7 +51,7 @@ DEFAULT_SYSTEM_CONFIG = {
         'max_charge_power':     75.0,  # C/2
         'max_discharge_power':  75.0,  # C/2
         'efficiency':          0.95,
-        'lcos':                1.5,
+        'lcos':                1.15,
         'min_reserve':         20,
     },
     'solar': {
@@ -88,7 +88,7 @@ class RandomConfigWrapper(gym.Wrapper):
                 'max_charge_power':    capacity / 2,
                 'max_discharge_power': capacity / 2,
                 'efficiency':          float(np.random.uniform(0.90, 0.98)),
-                'lcos':                float(np.random.uniform(0.5, 3.0)),
+                'lcos':                float(np.random.uniform(0.95, 1.25)),
                 'min_reserve':         int(np.random.randint(10, 31)),
             },
             'solar': {

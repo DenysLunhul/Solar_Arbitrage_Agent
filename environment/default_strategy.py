@@ -21,7 +21,7 @@ DEFAULT_SYSTEM_CONFIG = {
         'max_charge_power':    150,
         'max_discharge_power': 150,
         'efficiency':          0.95,
-        'lcos':                1.5,
+        'lcos':                1.15,
         'min_reserve':         20,
     },
     'solar': {
