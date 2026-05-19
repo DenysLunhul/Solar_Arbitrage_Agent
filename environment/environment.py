@@ -6,7 +6,7 @@ import pandas as pd
 
 class Environment(gym.Env):
 
-    PRICE_LOOKAHEAD = 4  # 1-hour price window fed to the network
+    PRICE_LOOKAHEAD = 16  # 4-hour price window fed to the network
 
     def __init__(self, df_raw: pd.DataFrame, df: pd.DataFrame, system_config: dict, episode_len: int = 96):
         super().__init__()
@@ -51,7 +51,7 @@ class Environment(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         n_features = df.shape[1]
-        # 17 normalized features + SoC + PRICE_LOOKAHEAD next DAM prices (1-hour horizon)
+        # 17 normalized features + SoC + PRICE_LOOKAHEAD next DAM prices (4-hour horizon)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(n_features + 1 + self.PRICE_LOOKAHEAD,), dtype=np.float32)
 
     def _calc_solar_generation_ts(self, gti_w_m2: float) -> float:
@@ -83,7 +83,7 @@ class Environment(gym.Env):
         row = self.df.iloc[idx]
         base = np.append(row.values, self.soc)
 
-        # Next PRICE_LOOKAHEAD DAM prices (1-hour horizon); zeros pad at end of episode.
+        # Next PRICE_LOOKAHEAD DAM prices (4-hour horizon); zeros pad at end of episode.
         lookahead_end = idx + self.PRICE_LOOKAHEAD
         remaining     = self.df['DAM_Price'].iloc[idx:lookahead_end].values
         price_vec     = np.zeros(self.PRICE_LOOKAHEAD, dtype=np.float32)

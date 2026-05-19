@@ -106,11 +106,11 @@ ds_project_demo/
 ### Spaces
 
 ```python
-PRICE_LOOKAHEAD = 4   # steps of future DAM_Price appended to observation
+PRICE_LOOKAHEAD = 16  # steps of future DAM_Price appended to observation (4-hour horizon)
 
 action_space      = Box(low=-1.0, high=1.0, shape=(2,), dtype=float32)
-observation_space = Box(low=-inf, high=inf, shape=(22,), dtype=float32)
-# 17 normalized feature cols + SoC + 4 price lookahead steps → shape (22,)
+observation_space = Box(low=-inf, high=inf, shape=(34,), dtype=float32)
+# 17 normalized feature cols + SoC + 16 price lookahead steps → shape (34,)
 ```
 
 | Action dim | Meaning |
@@ -443,7 +443,7 @@ Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — 
 | 2 | `requirements.txt` | ⚠️ Partial | Missing: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
 | 3 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via DB (API) but no live BMS/inverter integration |
 | 4 | No `GET /predictions/history` | ❌ Open | SAC predictions stored in DB but no endpoint to retrieve past days |
-| 5 | SAC training in progress | ⚠️ Training | Model needs full 10M-step run with current env fixes (reward normalization, day-aligned resets, soc_hard_min, 4-step lookahead). Predictions work but quality improves after retraining. |
+| 5 | SAC training in progress | ⚠️ Training | Model needs full 10M-step run with current env fixes (reward normalization, day-aligned resets, soc_hard_min, 16-step lookahead). Predictions work but quality improves after retraining. |
 
 ---
 
