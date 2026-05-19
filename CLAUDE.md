@@ -440,26 +440,107 @@ Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — 
 | # | Location | Status | Issue |
 |---|---|---|---|
 | 1 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active |
-| 2 | `requirements.txt` | ⚠️ Partial | Missing: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
+| 2 | `requirements.txt` | ✅ Fixed | All deps present: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
 | 3 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via DB (API) but no live BMS/inverter integration |
 | 4 | No `GET /predictions/history` | ❌ Open | SAC predictions stored in DB but no endpoint to retrieve past days |
 | 5 | SAC training in progress | ⚠️ Training | Model needs full 10M-step run with current env fixes (reward normalization, day-aligned resets, soc_hard_min, 16-step lookahead). Predictions work but quality improves after retraining. |
+| 6 | `data_combiner.py` | ✅ Fixed | `get_solar_parameters()` now has try/except — no longer crashes when DB is down |
+| 7 | `inference.py __main__` | ✅ Fixed | Project root added to `sys.path` so `data_providers` import works when running directly |
+| 8 | `inference.py __main__` | ✅ Fixed | NaN guard added — aborts with clear error if DAM columns are all NaN instead of crashing PyTorch |
+| 9 | `combined.csv` | ⚠️ External | DAM_Price/Vol columns are NaN when OREE fetch fails — inference will abort cleanly but needs live DAM data to run |
 
 ---
 
 ## Python Dependencies
 
-Current `requirements.txt`:
+Current `requirements.txt` (complete — no missing deps):
 ```
-fastapi, pandas, numpy, requests, openmeteo-requests, requests-cache,
-retry-requests, gymnasium, python-calamine, sqlalchemy, pyjwt,
-python-dotenv, pwdlib, pydantic, stable-baselines3, torch, tensorboard, boto3
+fastapi, uvicorn, pandas, numpy, requests, openmeteo-requests, requests-cache,
+retry-requests, gymnasium, python-calamine, sqlalchemy, psycopg2-binary, pyjwt,
+python-dotenv, pwdlib, pydantic, scikit-learn, stable-baselines3, torch,
+tensorboard, openpyxl
 ```
 
-Missing (add before running):
+---
+
+## AWS Deployment Architecture
+
+### Decisions made
+
+- **Database**: Amazon RDS (PostgreSQL 16) — not S3. S3 is object storage (no SQL queries, no transactions, no foreign keys). RDS is identical to local PostgreSQL — only `DATABASE_URL` in `.env` changes, zero code changes required.
+- **Application hosting**: EC2 running Docker containers.
+- **Target production path**: ECR + ECS (see below). For initial demo: `git clone` on EC2 + `docker-compose up`.
+- **API Gateway**: planned in front of EC2 for CORS handling, SSL, and rate limiting. Not yet set up.
+- **CORS**: `CORSMiddleware` with `allow_origins=["*"]` kept in `backend/main.py` until API Gateway is in place. Once API Gateway is configured, remove `CORSMiddleware` entirely — API Gateway handles it at the AWS level.
+
+### Target architecture
+
 ```
-scikit-learn       # normalize.py
-psycopg2-binary    # PostgreSQL driver
-openpyxl           # OREE Excel parsing
-uvicorn            # FastAPI server
+Browser
+    │
+    ▼
+API Gateway  ← handles CORS, SSL, rate limiting
+    │
+    ▼
+EC2 (FastAPI + Docker)
+    │  ├── RDS PostgreSQL (private VPC, port 5432)
+    │  ├── OREE (oree.com.ua) — DAM prices
+    │  └── Open-Meteo — weather forecast
 ```
+
+### Production deployment path (ECR + ECS)
+
+```
+Local machine                  AWS
+──────────────                 ──────────────────────────
+docker build .      →push→     ECR  (image registry)
+                                    │
+                               ECS  (runs containers, replaces docker-compose)
+                                    │
+                               RDS  (PostgreSQL)
+```
+
+- **ECR** = AWS Docker image registry (like Docker Hub but private)
+- **ECS** = AWS container orchestrator (replaces `docker-compose` in production)
+
+Commands (once ECR repo is created):
+```bash
+aws ecr get-login-password | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com
+docker build -t ems-api .
+docker tag ems-api:latest <account>.dkr.ecr.<region>.amazonaws.com/ems-api:latest
+docker push <account>.dkr.ecr.<region>.amazonaws.com/ems-api:latest
+```
+
+### RDS instance settings
+
+| Setting | Value | Notes |
+|---|---|---|
+| Engine | PostgreSQL 16 | |
+| Instance | `db.t3.micro` | ~$13/month; free tier eligible |
+| Storage | 20 GB gp2 | More than enough for predictions table |
+| Multi-AZ | No | Overkill for demo |
+| Public access | No | Private VPC only |
+| Security group | Allow 5432 from EC2 SG only | Never expose RDS to internet |
+
+### What changes when going from local → AWS
+
+| Item | Local | AWS |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://postgres:pass@localhost:5433/postgres` | `postgresql://user:pass@<rds-endpoint>:5432/dbname` |
+| DB tables | Created by `Base.metadata.create_all()` on startup | Same — auto-created on first `docker-compose up` / ECS start |
+| Model files | Local disk (tracked in git, 3.3 MB) | On EC2 after `git clone`; optionally move to S3 for easier updates |
+| App process | `docker-compose up` | ECS task / EC2 docker-compose |
+
+### Files added for deployment
+
+| File | Purpose |
+|---|---|
+| `Dockerfile` | Builds the FastAPI app image (CPU torch, python 3.13-slim) |
+| `.dockerignore` | Excludes `.venv`, logs, datasets from build context |
+| `docker-compose.yml` | Updated: app service added, MinIO removed (not used in code) |
+| `.env.example` | Documents all required env vars; use `db` as DB host inside docker-compose |
+
+### Local dev vs docker-compose DATABASE_URL
+
+- **Running locally** (outside Docker): `DATABASE_URL=postgresql://postgres:pass@localhost:5433/postgres`
+- **Running via docker-compose**: `DATABASE_URL=postgresql://postgres:pass@db:5432/postgres` — use service name `db`, internal port `5432` (not the mapped `5433`)

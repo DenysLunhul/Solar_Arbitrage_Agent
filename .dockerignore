@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.git/
+.idea/
+environment/logs/
+environment/results/
+environment/testing/results/
+temp/
+temp_scripts/
+datasets/

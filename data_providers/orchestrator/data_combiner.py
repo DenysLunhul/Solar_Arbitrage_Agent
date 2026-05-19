@@ -13,14 +13,15 @@ from backend.models.site import SystemConfig
 
 
 def get_solar_parameters(config_id):
-    db = SessionLocal()
-    config_record = db.query(SystemConfig).filter(SystemConfig.id == config_id).first()
-    db.close()
-
-    if config_record and config_record.settings:
-        solar = config_record.settings.get("solar", {})
-        return solar.get("solar_tilt", 35), solar.get("solar_azimuth", 0)
-
+    try:
+        db = SessionLocal()
+        config_record = db.query(SystemConfig).filter(SystemConfig.id == config_id).first()
+        db.close()
+        if config_record and config_record.settings:
+            solar = config_record.settings.get("solar", {})
+            return solar.get("solar_tilt", 35), solar.get("solar_azimuth", 0)
+    except Exception:
+        pass
     return 35, 0
 
 

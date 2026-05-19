@@ -189,10 +189,14 @@ def _fetch_soc_from_db(min_reserve: float) -> tuple[float, str]:
 
 if __name__ == '__main__':
     import json
+    import sys
     from pathlib import Path
 
     _ROOT    = Path(__file__).resolve().parent.parent
     _ENV_DIR = _ROOT / 'environment'
+
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--model',   default=str(_ENV_DIR / 'models' / 'best' / 'best_model.zip'))
@@ -231,6 +235,10 @@ if __name__ == '__main__':
 
     df = df.iloc[:96].reset_index(drop=True)
     print(f"Date: {str(df['timestamp'].iloc[0])[:10]}")
+
+    nan_dam_cols = [c for c in ('DAM_Price', 'DAM_Vol_Sale', 'DAM_Vol_Buy') if df[c].isnull().all()]
+    if nan_dam_cols:
+        raise SystemExit(f"ERROR: DAM data missing ({', '.join(nan_dam_cols)} are all NaN) — OREE fetch failed. Inference aborted.")
 
     min_reserve = system_config['battery']['min_reserve'] / 100
     if args.soc is not None:
