@@ -18,7 +18,8 @@ sys.path.insert(0, str(_DIR.parent))            # project root
 sys.path.insert(0, str(_DIR))                   # environment/ — default_strategy lives here
 os.chdir(_DIR)
 
-from default_strategy import generate_dispatch_plan, DEFAULT_STRATEGY, DEFAULT_SYSTEM_CONFIG
+from default_strategy import generate_dispatch_plan, DEFAULT_STRATEGY
+from inference import DEFAULT_SYSTEM_CONFIG
 
 RESULTS_DIR = Path(__file__).resolve().parent / 'results'
 

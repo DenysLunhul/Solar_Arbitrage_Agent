@@ -21,7 +21,7 @@ CONFIG = {
     'tensorboard_dir': 'logs/tensorboard/',
     'monitor_dir':     'logs/monitor/',
 
-    'total_timesteps': 10_000_000,
+    'total_timesteps': 20_000_000,
     'eval_freq':       100_000,
     'log_interval':    100_000,  # large value — suppress SB3 default episode logging
     'n_envs':          32,       # DummyVecEnv: no IPC overhead, env step ~0.11 ms each
@@ -36,12 +36,13 @@ CONFIG = {
         'tau':             0.005,
         'ent_coef':        'auto',
         'policy_kwargs': {
-            'net_arch': [256, 256],
+            'net_arch': [512, 512],
         },
         'verbose': 0,
         'seed':    42,
         'target_entropy': 'auto',
-        'use_sde':        False,
+        'use_sde':        True,
+        'sde_sample_freq': 8,
     }
 }
 

@@ -106,11 +106,14 @@ ds_project_demo/
 ### Spaces
 
 ```python
-PRICE_LOOKAHEAD = 16  # steps of future DAM_Price appended to observation (4-hour horizon)
+PRICE_LOOKAHEAD = 32  # steps of future DAM_Price appended to observation (8-hour horizon)
+PRICE_HISTORY   = 16  # steps of past  DAM_Price appended to observation (4-hour history)
+LOAD_LOOKAHEAD  = 16  # steps of future Load appended to observation (4-hour horizon)
+GTI_LOOKAHEAD   = 16  # steps of future GTI appended to observation (4-hour horizon)
 
 action_space      = Box(low=-1.0, high=1.0, shape=(2,), dtype=float32)
-observation_space = Box(low=-inf, high=inf, shape=(34,), dtype=float32)
-# 17 normalized feature cols + SoC + 16 price lookahead steps → shape (34,)
+observation_space = Box(low=-inf, high=inf, shape=(98,), dtype=float32)
+# 17 normalized feature cols + SoC + 32 price fwd + 16 price hist + 16 load + 16 GTI → shape (98,)
 ```
 
 | Action dim | Meaning |
@@ -175,13 +178,14 @@ SoC is randomized uniformly on each reset: `self.soc = uniform(0.0, 1.0)`.
 
 ```
 r_market      = |grid_export| × (DAM_price/1000)  OR  grid_import × -(DAM_price/1000 + 3.0)
-r_lcos        = -(lcos × |batt_energy_cycled|)
+r_lcos        = -(1.2 × lcos × |batt_energy_cycled|)
 r_unmet       = -(unmet_load × (DAM_price/1000 + 3.0) × 2)          # if unmet_load > 0
 r_mismatch    = 0.0                                                   # disabled (kept in info for compat)
 r_soc_soft    = -(50.0 × violation²)                                 # outside [soc_min, 0.80]
+              + -(25.0 × (target_soc - soc)²)                        # below target (grid up only)
 r_reserve     = -(50.0 × soc_deficit × log1p(outage_remaining_h))   # during outage
-r_preparation = 5.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage
-r_soc_target  = actual_chem_in × buy_price                           # when pre_charge_soc < target_soc
+r_preparation = 20.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage (≤3 h)
+r_soc_target  = actual_chem_in × buy_price                           # solar charge OR grid charge within 2 h of outage
 r_waste       = -(10.0 × lcos × wasted_kWh)                         # discharge exceeding demand + grid headroom
 
 reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalized by capacity
@@ -252,11 +256,11 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 | Parameter | Value |
 |---|---|
 | Algorithm | SAC (MlpPolicy) |
-| Total timesteps | 10 000 000 |
+| Total timesteps | 20 000 000 |
 | Buffer size | 1 000 000 |
 | Batch size | 512 |
 | Learning rate | 3e-4 |
-| Network arch | [256, 256] |
+| Network arch | [512, 512] |
 | n_envs | 32 (DummyVecEnv) |
 | n_eval_episodes | 20 |
 | Gamma | 0.99 |
@@ -443,7 +447,7 @@ Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — 
 | 2 | `requirements.txt` | ✅ Fixed | All deps present: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
 | 3 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via DB (API) but no live BMS/inverter integration |
 | 4 | No `GET /predictions/history` | ❌ Open | SAC predictions stored in DB but no endpoint to retrieve past days |
-| 5 | SAC training in progress | ⚠️ Training | Model needs full 10M-step run with current env fixes (reward normalization, day-aligned resets, soc_hard_min, 16-step lookahead). Predictions work but quality improves after retraining. |
+| 5 | SAC retraining required | ⚠️ Pending | Obs space changed to 98 dims — current best_model.zip is incompatible. Must retrain from scratch (20M steps). Run: `cd environment && ../.venv/bin/python train.py` |
 | 6 | `data_combiner.py` | ✅ Fixed | `get_solar_parameters()` now has try/except — no longer crashes when DB is down |
 | 7 | `inference.py __main__` | ✅ Fixed | Project root added to `sys.path` so `data_providers` import works when running directly |
 | 8 | `inference.py __main__` | ✅ Fixed | NaN guard added — aborts with clear error if DAM columns are all NaN instead of crashing PyTorch |
@@ -467,11 +471,13 @@ tensorboard, openpyxl
 
 ### Decisions made
 
-- **Database**: Amazon RDS (PostgreSQL 16) — not S3. S3 is object storage (no SQL queries, no transactions, no foreign keys). RDS is identical to local PostgreSQL — only `DATABASE_URL` in `.env` changes, zero code changes required.
-- **Application hosting**: EC2 running Docker containers.
-- **Target production path**: ECR + ECS (see below). For initial demo: `git clone` on EC2 + `docker-compose up`.
-- **API Gateway**: planned in front of EC2 for CORS handling, SSL, and rate limiting. Not yet set up.
+- **Database**: Amazon RDS (PostgreSQL) — not S3. S3 is object storage (no SQL queries, no transactions, no foreign keys). RDS is identical to local PostgreSQL — only `DATABASE_URL` in `.env` changes, zero code changes required.
+- **Application hosting**: ECS (Elastic Container Service) — AWS-managed container orchestrator, replaces `docker-compose`.
+- **Image registry**: ECR (Elastic Container Registry) — private Docker registry inside AWS; ECS pulls from here automatically.
+- **API Gateway**: planned in front of ECS for CORS handling, SSL, and rate limiting. Not yet set up.
 - **CORS**: `CORSMiddleware` with `allow_origins=["*"]` kept in `backend/main.py` until API Gateway is in place. Once API Gateway is configured, remove `CORSMiddleware` entirely — API Gateway handles it at the AWS level.
+- **Region**: `eu-north-1` (Stockholm)
+- **AWS Account ID**: `287528889753`
 
 ### Target architecture
 
@@ -479,16 +485,16 @@ tensorboard, openpyxl
 Browser
     │
     ▼
-API Gateway  ← handles CORS, SSL, rate limiting
+API Gateway  ← handles CORS, SSL, rate limiting  [⏳ not yet set up]
     │
     ▼
-EC2 (FastAPI + Docker)
+ECS (FastAPI container)  ← pulls image from ECR
     │  ├── RDS PostgreSQL (private VPC, port 5432)
     │  ├── OREE (oree.com.ua) — DAM prices
     │  └── Open-Meteo — weather forecast
 ```
 
-### Production deployment path (ECR + ECS)
+### Deployment path (ECR + ECS + RDS)
 
 ```
 Local machine                  AWS
@@ -497,39 +503,59 @@ docker build .      →push→     ECR  (image registry)
                                     │
                                ECS  (runs containers, replaces docker-compose)
                                     │
-                               RDS  (PostgreSQL)
+                               RDS  (PostgreSQL, private subnet)
 ```
 
-- **ECR** = AWS Docker image registry (like Docker Hub but private)
+- **ECR** = AWS Docker image registry (like Docker Hub but private, zero transfer cost within AWS)
 - **ECS** = AWS container orchestrator (replaces `docker-compose` in production)
+- **RDS** = managed PostgreSQL — only `DATABASE_URL` changes vs local dev
 
-Commands (once ECR repo is created):
+### ECR push commands (actual, eu-north-1)
+
 ```bash
-aws ecr get-login-password | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com
+# 1. Authenticate Docker to ECR
+aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 287528889753.dkr.ecr.eu-north-1.amazonaws.com
+
+# 2. Build image (from project root)
 docker build -t ems-api .
-docker tag ems-api:latest <account>.dkr.ecr.<region>.amazonaws.com/ems-api:latest
-docker push <account>.dkr.ecr.<region>.amazonaws.com/ems-api:latest
+
+# 3. Tag for ECR
+docker tag ems-api:latest 287528889753.dkr.ecr.eu-north-1.amazonaws.com/ems-api:latest
+
+# 4. Push
+docker push 287528889753.dkr.ecr.eu-north-1.amazonaws.com/ems-api:latest
 ```
 
-### RDS instance settings
+### Security Groups (created)
+
+| Name | Attached to | Rule |
+|---|---|---|
+| `ems-app-sg` | ECS task | Inbound TCP 8000 from `0.0.0.0/0` |
+| `ems-db-sg` | RDS | Inbound TCP 5432 from `ems-app-sg` only |
+
+### RDS instance settings (actual)
 
 | Setting | Value | Notes |
 |---|---|---|
-| Engine | PostgreSQL 16 | |
-| Instance | `db.t3.micro` | ~$13/month; free tier eligible |
-| Storage | 20 GB gp2 | More than enough for predictions table |
-| Multi-AZ | No | Overkill for demo |
+| Instance name | `ems-db` | |
+| Engine | PostgreSQL 18.3 | Latest available at creation time |
+| Instance | `db.t3.micro` | Free tier eligible ($0 for 12 months) |
+| Storage | 20 GB gp2 | |
+| Multi-AZ | No | Single-AZ, Dev/Test template |
 | Public access | No | Private VPC only |
-| Security group | Allow 5432 from EC2 SG only | Never expose RDS to internet |
+| Security group | `ems-db-sg` | Port 5432 from `ems-app-sg` only |
+| Initial DB name | `postgres` | Required — tables auto-created by SQLAlchemy on first start |
+
+**RDS endpoint**: retrieve from RDS console → `ems-db` → Connectivity & security → Endpoint.
 
 ### What changes when going from local → AWS
 
 | Item | Local | AWS |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://postgres:pass@localhost:5433/postgres` | `postgresql://user:pass@<rds-endpoint>:5432/dbname` |
-| DB tables | Created by `Base.metadata.create_all()` on startup | Same — auto-created on first `docker-compose up` / ECS start |
-| Model files | Local disk (tracked in git, 3.3 MB) | On EC2 after `git clone`; optionally move to S3 for easier updates |
-| App process | `docker-compose up` | ECS task / EC2 docker-compose |
+| `DATABASE_URL` | `postgresql://postgres:pass@localhost:5433/postgres` | `postgresql://postgres:<pass>@<rds-endpoint>:5432/postgres` |
+| DB tables | Created by `Base.metadata.create_all()` on startup | Same — auto-created on first ECS task start |
+| Model files | Local disk (in git, ~3 MB) | Bundled into Docker image via `COPY . .` in Dockerfile |
+| App process | `docker-compose up` | ECS service (task definition + service) |
 
 ### Files added for deployment
 
@@ -544,3 +570,17 @@ docker push <account>.dkr.ecr.<region>.amazonaws.com/ems-api:latest
 
 - **Running locally** (outside Docker): `DATABASE_URL=postgresql://postgres:pass@localhost:5433/postgres`
 - **Running via docker-compose**: `DATABASE_URL=postgresql://postgres:pass@db:5432/postgres` — use service name `db`, internal port `5432` (not the mapped `5433`)
+- **Running on ECS**: `DATABASE_URL=postgresql://postgres:<pass>@<rds-endpoint>:5432/postgres` — set as environment variable in ECS task definition
+
+### Current deployment status (2026-05-20)
+
+| Step | Status | Notes |
+|---|---|---|
+| Security groups | ✅ Done | `ems-app-sg` + `ems-db-sg` created |
+| RDS PostgreSQL | ✅ Done | `ems-db` provisioned, eu-north-1, free tier |
+| ECR repository | ✅ Done | `ems-api` created at `287528889753.dkr.ecr.eu-north-1.amazonaws.com/ems-api` |
+| AWS CLI install | ✅ Done | v2.34.50 installed via apt |
+| AWS CLI credentials | 🔄 In progress | Running `aws configure` with IAM access key |
+| Docker image push | ⏳ Pending | Build + push to ECR once CLI configured |
+| ECS cluster | ⏳ Pending | Create cluster → task definition → service |
+| API Gateway | ⏳ Pending | SSL + CORS — after ECS is working |

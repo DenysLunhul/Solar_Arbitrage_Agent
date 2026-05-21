@@ -6,7 +6,10 @@ import pandas as pd
 
 class Environment(gym.Env):
 
-    PRICE_LOOKAHEAD = 16  # 4-hour price window fed to the network
+    PRICE_LOOKAHEAD = 32  # 8-hour forward price window fed to the network
+    PRICE_HISTORY   = 16  # 4-hour backward price window (context for arbitrage)
+    LOAD_LOOKAHEAD  = 16  # 4-hour load forecast fed to the network
+    GTI_LOOKAHEAD   = 16  # 4-hour solar irradiance forecast fed to the network
 
     def __init__(self, df_raw: pd.DataFrame, df: pd.DataFrame, system_config: dict, episode_len: int = 96):
         super().__init__()
@@ -51,22 +54,23 @@ class Environment(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         n_features = df.shape[1]
-        # 17 normalized features + SoC + PRICE_LOOKAHEAD next DAM prices (4-hour horizon)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(n_features + 1 + self.PRICE_LOOKAHEAD,), dtype=np.float32)
+        # 17 normalized features + SoC + 8-hour price lookahead + 4-hour price history + load/GTI lookahead
+        obs_size = n_features + 1 + self.PRICE_LOOKAHEAD + self.PRICE_HISTORY + self.LOAD_LOOKAHEAD + self.GTI_LOOKAHEAD
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
 
     def _calc_solar_generation_ts(self, gti_w_m2: float) -> float:
         power_w       = gti_w_m2 * self.solar_efficiency * self.panel_area_m2
         energy_kwh_ts = (power_w / 1000.0) / 4
         return max(0.0, energy_kwh_ts)
 
-    # Economic buffer SoC to maintain on days with no forecasted outage.
-    # Gives r_soc_target something to reward and r_soc_below a continuous signal.
-    DEFAULT_SOC_TARGET = 0.50
+    # Economic buffer SoC when no outage is forecasted. 0.30 avoids forcing
+    # expensive grid charging in winter while still providing an arbitrage reserve.
+    DEFAULT_SOC_TARGET = 0.30
 
     def _calc_target_soc(self, next_outage_h: float, curr_load_kw: float, gti_w_m2: float) -> float:
         """Dynamic target SoC: energy needed to survive the upcoming outage, clipped to [soc_soft_min, soc_soft_max]."""
         if next_outage_h <= 0:
-            return max(self.soc_soft_min, self.DEFAULT_SOC_TARGET)
+            return self.DEFAULT_SOC_TARGET
 
         energy_load  = curr_load_kw * next_outage_h
         solar_per_hour = self._calc_solar_generation_ts(gti_w_m2) * 4
@@ -74,6 +78,8 @@ class Environment(gym.Env):
         net_energy_needed  = max(0.0, energy_load - energy_solar)
         energy_with_buffer = net_energy_needed * 1.10
         target_soc = energy_with_buffer / self.max_batt_capacity
+        # DEFAULT_SOC_TARGET is the economic baseline — never let small outages collapse the target to soc_soft_min
+        target_soc = max(target_soc, self.DEFAULT_SOC_TARGET)
         target_soc = np.clip(target_soc, self.soc_soft_min, self.soc_soft_max)
 
         return float(target_soc)
@@ -83,13 +89,26 @@ class Environment(gym.Env):
         row = self.df.iloc[idx]
         base = np.append(row.values, self.soc)
 
-        # Next PRICE_LOOKAHEAD DAM prices (4-hour horizon); zeros pad at end of episode.
-        lookahead_end = idx + self.PRICE_LOOKAHEAD
-        remaining     = self.df['DAM_Price'].iloc[idx:lookahead_end].values
-        price_vec     = np.zeros(self.PRICE_LOOKAHEAD, dtype=np.float32)
-        price_vec[:len(remaining)] = remaining
+        # Forward lookahead: 8-hour price, 4-hour load/GTI; zero-pad beyond dataset end.
+        price_fwd = np.zeros(self.PRICE_LOOKAHEAD, dtype=np.float32)
+        load_vec  = np.zeros(self.LOAD_LOOKAHEAD,  dtype=np.float32)
+        gti_vec   = np.zeros(self.GTI_LOOKAHEAD,   dtype=np.float32)
 
-        return np.concatenate([base, price_vec]).astype(np.float32)
+        p = self.df['DAM_Price'].iloc[idx:idx + self.PRICE_LOOKAHEAD].values
+        l = self.df['Load'].iloc[idx:idx + self.LOAD_LOOKAHEAD].values
+        g = self.df['Global_tilted_irradiance_instant'].iloc[idx:idx + self.GTI_LOOKAHEAD].values
+
+        price_fwd[:len(p)] = p
+        load_vec[:len(l)]  = l
+        gti_vec[:len(g)]   = g
+
+        # Backward price history: most recent at the end, zero-padded at the start.
+        price_hist = np.zeros(self.PRICE_HISTORY, dtype=np.float32)
+        hist_start = max(0, idx - self.PRICE_HISTORY)
+        h = self.df['DAM_Price'].iloc[hist_start:idx].values
+        price_hist[self.PRICE_HISTORY - len(h):] = h
+
+        return np.concatenate([base, price_fwd, price_hist, load_vec, gti_vec]).astype(np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -197,6 +216,7 @@ class Environment(gym.Env):
         r_reserve     = 0.0
         r_preparation = 0.0
         r_soc_target  = 0.0
+        r_curtail     = 0.0
 
         if actual_grid_ts > 0:
             r_market = -actual_grid_ts * buy_price
@@ -209,7 +229,7 @@ class Environment(gym.Env):
             money_earned_ts = -actual_grid_ts * buy_price         # cost of buying (negative)
 
         lcos_cost = self.lcos * actual_batt_energy_abs
-        r_lcos    = -lcos_cost
+        r_lcos    = -1.2 * lcos_cost
 
         if unmet_load > 0:
             r_unmet = -unmet_load * buy_price * 2
@@ -226,11 +246,10 @@ class Environment(gym.Env):
             r_soc_soft -= 50.0 * ((self.soc - self.soc_soft_max) ** 2)
 
         # Continuous below-target penalty (grid up only): fires every step when SoC < target_soc.
-        # Without this, target_soc = DEFAULT_SOC_TARGET has no gradient when the agent never charges.
-        # Coefficient 5.0: at SoC=0.20, target=0.50 → -5×0.09=-0.45/step ≈ -29 over a full night,
-        # comparable to the cost savings from discharging stored energy instead of buying from grid.
+        # Coefficient 25.0: firm enough to motivate solar charging without forcing expensive
+        # grid charging just to satisfy the SoC target in winter.
         if grid_status == 1 and self.soc < target_soc:
-            r_soc_soft -= 5.0 * ((target_soc - self.soc) ** 2)
+            r_soc_soft -= 25.0 * ((target_soc - self.soc) ** 2)
 
         if grid_status == 0 and outage_remaining_h > 0:
             soc_deficit = max(0.0, target_soc - self.soc)
@@ -240,15 +259,24 @@ class Environment(gym.Env):
         if grid_status == 1 and 0 < hours_until_outage <= 3.0:
             urgency       = np.exp(-0.5 * hours_until_outage)
             soc_ready     = min(self.soc, target_soc)
-            r_preparation = 5.0 * urgency * soc_ready
+            r_preparation = 20.0 * urgency * soc_ready
 
-        # Reward = energy stored × buy_price (avoided future purchase cost), making charging
-        # toward reserve target economically competitive with selling solar surplus.
-        # Check pre-charge SoC to handle large actions that overshoot target in one step.
+        # Reward stored energy × buy_price (avoided future purchase cost).
+        # Two valid cases for charging toward the reserve target:
+        #   1. Solar-sourced: always allowed — rewards the solar fraction only, so grid
+        #      charging has no free ride (avoids buy-then-sell arbitrage that always loses).
+        #   2. Imminent outage (≤2 h): grid charging is economically justified because the
+        #      avoided unmet-load penalty (2×buy_price/kWh) exceeds the grid charge cost.
+        #      Tight 2-hour window prevents frequent-outage winters from triggering this all day.
+        pre_outage_grid_charge = grid_status == 1 and 0 < hours_until_outage <= 2.0
         if battery_energy_delta > 0:
             pre_charge_soc = self.soc - actual_chem_in / self.max_batt_capacity
             if pre_charge_soc < target_soc:
-                r_soc_target = actual_chem_in * buy_price  # economic value of stored reserve
+                if solar_used_for_batt > 0:
+                    solar_chem_stored = solar_used_for_batt * self.batt_efficiency
+                    r_soc_target = min(actual_chem_in, solar_chem_stored) * buy_price
+                elif pre_outage_grid_charge:
+                    r_soc_target = actual_chem_in * buy_price
 
         # Wasted-discharge: battery energy that can't reach demand OR be exported to grid.
         # Grid headroom = capacity remaining after solar takes its share.
@@ -260,9 +288,18 @@ class Environment(gym.Env):
             wasted          = max(0.0, batt_contribution_ts - demand_covered - exportable_batt)
             r_waste         = -10.0 * self.lcos * wasted
 
+        # Solar curtailment: penalise free surplus that is neither stored nor exported.
+        # The environment requires an explicit export action; a passive action[1]≤0 silently
+        # discards the surplus. Full curr_price penalty = foregone revenue per kWh curtailed.
+        if grid_status == 1 and total_export_possible > 0.01:
+            actually_exported = max(0.0, -actual_grid_ts)
+            curtailed = max(0.0, total_export_possible - actually_exported)
+            if curtailed > 0.01:
+                r_curtail = -curtailed * curr_price
+
         # Normalize by capacity so episodes with different hardware produce comparable gradient scales.
         # Without this, a 250 kWh episode dominates a 50 kWh one by 5× in the replay buffer.
-        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste) / (self.max_batt_capacity / 100.0)
+        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste + r_curtail) / (self.max_batt_capacity / 100.0)
 
         self.curr_step += 1
         terminated = self.curr_step >= self.episode_start + self.episode_len
@@ -290,6 +327,7 @@ class Environment(gym.Env):
             'reward_preparation':r_preparation,
             'reward_soc_target': r_soc_target,
             'reward_waste':      r_waste,
+            'reward_curtail':    r_curtail,
         }
 
         return observation, reward, terminated, truncated, info
