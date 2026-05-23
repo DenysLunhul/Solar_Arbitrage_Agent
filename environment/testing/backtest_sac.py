@@ -19,7 +19,30 @@ sys.path.insert(0, str(_DIR.parent))            # project root
 sys.path.insert(0, str(_DIR))                   # environment/ — inference lives here
 os.chdir(_DIR)
 
-from inference import load_model_and_scalers, run_inference, DEFAULT_SYSTEM_CONFIG
+from inference import load_model_and_scalers, run_inference
+
+# 150 kWh mid-range config — matches the fixed eval env used during SAC training.
+# Using this config ensures the backtest reflects the distribution the model optimised for.
+EVAL_SYSTEM_CONFIG = {
+    'battery': {
+        'capacity_kwh':        150.0,
+        'max_charge_power':     75.0,   # C/2
+        'max_discharge_power':  75.0,   # C/2
+        'efficiency':          0.95,
+        'lcos':                1.15,
+        'min_reserve':         20,
+    },
+    'solar': {
+        'peak_power':  200.0,
+        'efficiency':  0.2,
+    },
+    'inverter': {
+        'max_power': 180.0,
+    },
+    'grid': {
+        'capacity': 220.0,
+    },
+}
 
 RESULTS_DIR = Path(__file__).resolve().parent / 'results'
 
@@ -99,7 +122,7 @@ if __name__ == '__main__':
         model_path=args.model,
         scalers_path=args.scalers,
         obs_rms_path=args.obsrms,
-        system_config=DEFAULT_SYSTEM_CONFIG,
+        system_config=EVAL_SYSTEM_CONFIG,
         initial_soc=args.soc,
     )
 

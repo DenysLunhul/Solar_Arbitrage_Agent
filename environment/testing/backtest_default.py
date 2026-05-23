@@ -19,7 +19,27 @@ sys.path.insert(0, str(_DIR))                   # environment/ — default_strat
 os.chdir(_DIR)
 
 from default_strategy import generate_dispatch_plan, DEFAULT_STRATEGY
-from inference import DEFAULT_SYSTEM_CONFIG
+
+EVAL_SYSTEM_CONFIG = {
+    'battery': {
+        'capacity_kwh':        150.0,
+        'max_charge_power':     75.0,
+        'max_discharge_power':  75.0,
+        'efficiency':          0.95,
+        'lcos':                1.15,
+        'min_reserve':         20,
+    },
+    'solar': {
+        'peak_power':  200.0,
+        'efficiency':  0.2,
+    },
+    'inverter': {
+        'max_power': 180.0,
+    },
+    'grid': {
+        'capacity': 220.0,
+    },
+}
 
 RESULTS_DIR = Path(__file__).resolve().parent / 'results'
 
@@ -93,7 +113,7 @@ if __name__ == '__main__':
     dispatch_df, summary_df = run(
         dataset_path=args.dataset,
         dataset_norm_path=args.norm,
-        system_config=DEFAULT_SYSTEM_CONFIG,
+        system_config=EVAL_SYSTEM_CONFIG,
         strategy=DEFAULT_STRATEGY,
         initial_soc=args.soc,
     )

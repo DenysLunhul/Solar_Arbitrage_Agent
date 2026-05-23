@@ -49,11 +49,12 @@ def combine(config_id, tilt=None, azimuth=None):
                 errors='coerce',
             )
 
-    current_year = datetime.now().year
-    dataset['timestamp'] = dataset.apply(
-        lambda r: datetime(current_year, int(r['Month']), int(r['Day']), int(r['Hour']), int(r['Minute'])),
-        axis=1
-    )
+    def _make_ts(r):
+        month, day = int(r['Month']), int(r['Day'])
+        # Detect Dec-31 → Jan-1 rollover: data month/day is earlier in calendar than today
+        year = today.year + 1 if (month, day) < (today.month, today.day) else today.year
+        return datetime(year, month, day, int(r['Hour']), int(r['Minute']))
+    dataset['timestamp'] = dataset.apply(_make_ts, axis=1)
     cols = dataset.columns.tolist()
     cols = [cols[-1]] + cols[:-1]
     dataset = dataset[cols]

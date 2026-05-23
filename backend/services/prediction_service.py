@@ -251,6 +251,7 @@ def _build_rows(
             target_soc=step_data["target_soc"],
             lcos_cost=step_data["lcos_cost"],
             mismatch=step_data["mismatch"],
+            money_earned_ts=step_data["money_earned_ts"],
             dam_price=float(row["DAM_Price"]) / 1000,
             grid_status=int(row["Grid"]),
             hours_until_outage=float(row["hours_until_outage"]),
@@ -265,6 +266,7 @@ def _build_rows(
             reward_preparation=step_data["reward_preparation"],
             reward_soc_target=step_data["reward_soc_target"],
             reward_waste=step_data["reward_waste"],
+            reward_curtail=step_data["reward_curtail"],
             reward_total=step_data["reward"],
         ))
     return rows

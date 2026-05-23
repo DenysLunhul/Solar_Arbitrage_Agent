@@ -132,6 +132,11 @@ class Environment(gym.Env):
         outage_remaining_h = row['outage_remaining_h']
         next_outage_h      = row['next_outage_duration']
 
+        # Day-average price for price-timing reward: mean of the current episode day's prices.
+        day_start = (self.curr_step // 96) * 96
+        day_end   = min(day_start + 96, len(self.df_raw))
+        day_avg_price = float(self.df_raw['DAM_Price'].iloc[day_start:day_end].mean()) / 1000
+
         target_soc = self._calc_target_soc(next_outage_h, curr_load_kw, gti)
 
         solar_gen_ts = self._calc_solar_generation_ts(gti)
@@ -155,6 +160,14 @@ class Environment(gym.Env):
             solar_used_for_batt     = min(solar_surplus_ts, energy_drawn_for_batt)
             grid_needed_for_batt    = max(0.0, energy_drawn_for_batt - solar_used_for_batt)
 
+            # During outage the grid can't supply charging energy — cap to solar only.
+            # Without this the battery gains phantom SoC from a non-existent grid source
+            # and grid_needed_for_batt inflates unmet_load with demand that can't be real.
+            if grid_status == 0:
+                energy_drawn_for_batt = solar_used_for_batt
+                actual_chem_in        = solar_used_for_batt * self.batt_efficiency
+                grid_needed_for_batt  = 0.0
+
             self.soc = min(1.0, self.soc + actual_chem_in / self.max_batt_capacity)
 
             remaining_solar_surplus = max(0.0, solar_surplus_ts - solar_used_for_batt)
@@ -163,12 +176,23 @@ class Environment(gym.Env):
 
         else:
             energy_to_draw = abs(battery_energy_delta)
+            # Convert requested DC output to chemical kWh needed (mirrors charge-side logic).
+            # Without this, energy_to_draw (DC) is compared to max_drawable (chemical),
+            # causing underdelivery and incorrect SoC drain in the non-limiting case.
+            chem_needed = energy_to_draw / self.batt_efficiency
             # Grid up: strategic floor (min_reserve). Grid down: physical BMS floor only.
             if grid_status == 1:
                 max_drawable = max(0.0, (self.soc - self.soc_soft_min) * self.max_batt_capacity)
             else:
                 max_drawable = max(0.0, (self.soc - self.soc_hard_min) * self.max_batt_capacity)
-            actual_draw    = min(energy_to_draw, max_drawable)
+            actual_draw    = min(chem_needed, max_drawable)   # both in chemical kWh
+
+            # Island mode: battery can only discharge as much as load demands — no grid to absorb excess.
+            # Without this cap the full requested discharge drains SoC even though only load_kwh reaches demand.
+            if grid_status == 0:
+                load_chem   = residual_demand_ts / self.batt_efficiency
+                actual_draw = min(actual_draw, load_chem)
+
             batt_output_ts = actual_draw * self.batt_efficiency
 
             self.soc = max(self.soc_hard_min, self.soc - actual_draw / self.max_batt_capacity)
@@ -229,10 +253,10 @@ class Environment(gym.Env):
             money_earned_ts = -actual_grid_ts * buy_price         # cost of buying (negative)
 
         lcos_cost = self.lcos * actual_batt_energy_abs
-        r_lcos    = -1.2 * lcos_cost
+        r_lcos    = -1.4 * lcos_cost
 
         if unmet_load > 0:
-            r_unmet = -unmet_load * buy_price * 2
+            r_unmet = -unmet_load * buy_price * 5
 
         # Mismatch removed: r_market already penalises/rewards actual grid transactions;
         # a separate mismatch term dominated the gradient without teaching new behaviour.
@@ -246,44 +270,38 @@ class Environment(gym.Env):
             r_soc_soft -= 50.0 * ((self.soc - self.soc_soft_max) ** 2)
 
         # Continuous below-target penalty (grid up only): fires every step when SoC < target_soc.
-        # Coefficient 25.0: firm enough to motivate solar charging without forcing expensive
-        # grid charging just to satisfy the SoC target in winter.
+        # Coefficient 100.0: strong enough that daily gap penalty (-64 norm) exceeds one
+        # grid-charge step cost (-90 norm), giving SAC a clear margin to learn winter charging.
         if grid_status == 1 and self.soc < target_soc:
-            r_soc_soft -= 25.0 * ((target_soc - self.soc) ** 2)
+            r_soc_soft -= 100.0 * ((target_soc - self.soc) ** 2)
 
         if grid_status == 0 and outage_remaining_h > 0:
             soc_deficit = max(0.0, target_soc - self.soc)
             if soc_deficit > 0:
                 r_reserve = -50.0 * soc_deficit * np.log1p(outage_remaining_h)
 
-        if grid_status == 1 and 0 < hours_until_outage <= 3.0:
+        if grid_status == 1 and 0 < hours_until_outage <= 6.0:
             urgency       = np.exp(-0.5 * hours_until_outage)
             soc_ready     = min(self.soc, target_soc)
             r_preparation = 20.0 * urgency * soc_ready
 
-        # Reward stored energy × buy_price (avoided future purchase cost).
-        # Two valid cases for charging toward the reserve target:
-        #   1. Solar-sourced: always allowed — rewards the solar fraction only, so grid
-        #      charging has no free ride (avoids buy-then-sell arbitrage that always loses).
-        #   2. Imminent outage (≤2 h): grid charging is economically justified because the
-        #      avoided unmet-load penalty (2×buy_price/kWh) exceeds the grid charge cost.
-        #      Tight 2-hour window prevents frequent-outage winters from triggering this all day.
-        pre_outage_grid_charge = grid_status == 1 and 0 < hours_until_outage <= 2.0
-        if battery_energy_delta > 0:
+        # Reward solar-sourced charging toward the reserve target at avoided-purchase value.
+        # Grid-sourced charging is intentionally excluded: r_market already penalises the
+        # import cost, and adding r_soc_target on top creates a near-zero net signal that
+        # teaches the agent to freely grid-charge (r_market + r_soc_target ≈ 0). The
+        # r_unmet penalty alone is sufficient to drive pre-outage grid charging when needed.
+        if battery_energy_delta > 0 and solar_used_for_batt > 0:
             pre_charge_soc = self.soc - actual_chem_in / self.max_batt_capacity
             if pre_charge_soc < target_soc:
-                if solar_used_for_batt > 0:
-                    solar_chem_stored = solar_used_for_batt * self.batt_efficiency
-                    r_soc_target = min(actual_chem_in, solar_chem_stored) * buy_price
-                elif pre_outage_grid_charge:
-                    r_soc_target = actual_chem_in * buy_price
+                solar_chem_stored = solar_used_for_batt * self.batt_efficiency
+                r_soc_target = min(actual_chem_in, solar_chem_stored) * buy_price
 
         # Wasted-discharge: battery energy that can't reach demand OR be exported to grid.
         # Grid headroom = capacity remaining after solar takes its share.
         r_waste = 0.0
         if battery_energy_delta < 0 and batt_contribution_ts > 0:
             demand_covered  = min(batt_contribution_ts, residual_demand_ts)
-            grid_headroom   = max(0.0, self.max_grid_capacity_ts - remaining_solar_surplus)
+            grid_headroom   = 0.0 if grid_status == 0 else max(0.0, self.max_grid_capacity_ts - remaining_solar_surplus)
             exportable_batt = min(batt_export_possible, grid_headroom)
             wasted          = max(0.0, batt_contribution_ts - demand_covered - exportable_batt)
             r_waste         = -10.0 * self.lcos * wasted
@@ -297,9 +315,23 @@ class Environment(gym.Env):
             if curtailed > 0.01:
                 r_curtail = -curtailed * curr_price
 
+        # Price-timing bonus: reward selling above the day's average price, penalise buying above it.
+        # Coefficient 1.0 (down from 2.0): less aggressive holding reduces curtailment in summer
+        # while keeping the buy-cheap/sell-expensive gradient intact.
+        # Suppressed when outage is imminent (≤3h) and battery is underprepared — at that point
+        # charging is mandatory regardless of price.
+        r_price_timing = 0.0
+        outage_imminent = grid_status == 1 and 0 < hours_until_outage <= 3.0 and self.soc < target_soc
+        if grid_status == 1 and not outage_imminent:
+            price_dev = curr_price - day_avg_price
+            if actual_grid_ts < 0:   # selling to grid
+                r_price_timing =  price_dev * abs(actual_grid_ts) * 1.0   # bonus for selling high
+            elif actual_grid_ts > 0: # buying from grid
+                r_price_timing = -price_dev * actual_grid_ts * 1.0        # penalty for buying high
+
         # Normalize by capacity so episodes with different hardware produce comparable gradient scales.
         # Without this, a 250 kWh episode dominates a 50 kWh one by 5× in the replay buffer.
-        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste + r_curtail) / (self.max_batt_capacity / 100.0)
+        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste + r_curtail + r_price_timing) / (self.max_batt_capacity / 100.0)
 
         self.curr_step += 1
         terminated = self.curr_step >= self.episode_start + self.episode_len
@@ -326,8 +358,9 @@ class Environment(gym.Env):
             'reward_reserve':    r_reserve,
             'reward_preparation':r_preparation,
             'reward_soc_target': r_soc_target,
-            'reward_waste':      r_waste,
-            'reward_curtail':    r_curtail,
+            'reward_waste':        r_waste,
+            'reward_curtail':      r_curtail,
+            'reward_price_timing': r_price_timing,
         }
 
         return observation, reward, terminated, truncated, info

@@ -74,7 +74,8 @@ class AgentPredictions(Base):
     outage_remaining_h   = Column(Float)
     next_outage_duration = Column(Float)
 
-    mismatch = Column(Float)
+    mismatch         = Column(Float)
+    money_earned_ts  = Column(Float)
 
     reward_market      = Column(Float)
     reward_lcos        = Column(Float)
@@ -85,6 +86,7 @@ class AgentPredictions(Base):
     reward_preparation = Column(Float)
     reward_soc_target  = Column(Float)
     reward_waste       = Column(Float)
+    reward_curtail     = Column(Float)
     reward_total       = Column(Float)
 
 

@@ -17,7 +17,7 @@ ds_project_demo/
 ├── docker-compose.yml
 ├── requirements.txt
 ├── .env                                   # DATABASE_URL, SECRET_KEY, ALGORITHM, ACCESS_EXPIRE_MINUTES
-├── envoriment/                            # (folder name typo — kept as-is)
+├── environment/                           # RL environment, training, inference, backtests
 │   ├── environment.py                     # Gymnasium RL environment (fully implemented)
 │   ├── train.py                           # Standalone SAC training script (domain randomization)
 │   ├── inference.py                       # Inference module: run_inference() for FastAPI integration
@@ -66,7 +66,7 @@ ds_project_demo/
 │   ├── routers/
 │   │   ├── auth.py                        # POST /auth/login, POST /auth/register
 │   │   ├── config.py                      # POST /config/, GET /config/, GET /config/list
-│   │   ├── predictions.py                 # GET /predictions/, GET /predictions/default
+│   │   ├── predictions.py                 # GET /predictions/, /default, /history, /history/dates
 │   │   └── strategy.py                    # POST /strategy/, GET /strategy/, GET /strategy/list
 │   ├── schemas/schemas.py                 # Pydantic: SiteConfig, DefaultStrategyConfig, PredictionResponse, …
 │   ├── services/
@@ -75,6 +75,15 @@ ds_project_demo/
 │   │   ├── prediction_service.py          # SAC + default strategy prediction pipelines
 │   │   └── strategy_service.py            # save / get / list default strategies
 │   └── security/security.py              # JWT (HS256), pwdlib Argon2 password hashing
+├── frontend/                              # React SPA (Vite + Recharts)
+│   ├── package.json                       # react, react-dom, recharts, vite
+│   ├── vite.config.js                     # Vite config (port 3000)
+│   ├── index.html                         # Vite entry point
+│   ├── .env.example                       # VITE_API_URL variable
+│   └── src/
+│       ├── main.jsx                       # React root mount
+│       ├── api.js                         # All API calls + JWT token management
+│       └── App.jsx                        # Full dashboard (login, charts, table, history)
 └── temp/                                  # One-off data-cleaning utility scripts
 ```
 
@@ -94,7 +103,7 @@ ds_project_demo/
 
 ---
 
-## RL Environment (`envoriment/environment.py`)
+## RL Environment (`environment/environment.py`)
 
 ### Dual-Dataset Architecture
 
@@ -174,7 +183,7 @@ Episodes are **day-aligned**: each reset picks a random full day from the datase
 
 SoC is randomized uniformly on each reset: `self.soc = uniform(0.0, 1.0)`.
 
-### Reward Function (9 components, all tracked separately in `info`)
+### Reward Function (10 components, all tracked separately in `info`)
 
 ```
 r_market      = |grid_export| × (DAM_price/1000)  OR  grid_import × -(DAM_price/1000 + 3.0)
@@ -182,28 +191,37 @@ r_lcos        = -(1.2 × lcos × |batt_energy_cycled|)
 r_unmet       = -(unmet_load × (DAM_price/1000 + 3.0) × 2)          # if unmet_load > 0
 r_mismatch    = 0.0                                                   # disabled (kept in info for compat)
 r_soc_soft    = -(50.0 × violation²)                                 # outside [soc_min, 0.80]
-              + -(25.0 × (target_soc - soc)²)                        # below target (grid up only)
+              + -(100.0 × (target_soc - soc)²)                       # below target (grid up only)
 r_reserve     = -(50.0 × soc_deficit × log1p(outage_remaining_h))   # during outage
-r_preparation = 20.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage (≤3 h)
-r_soc_target  = actual_chem_in × buy_price                           # solar charge OR grid charge within 2 h of outage
+r_preparation = 20.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage (≤6 h)
+r_soc_target  = solar_chem_stored × buy_price                        # solar-sourced charging while soc < target_soc
 r_waste       = -(10.0 × lcos × wasted_kWh)                         # discharge exceeding demand + grid headroom
+r_curtail     = -(curtailed_kWh × curr_price)                        # free export surplus not stored or exported (grid up)
 
 reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalized by capacity
 ```
 
 **Reward normalization**: dividing by `capacity / 100` keeps reward magnitude consistent across the domain-randomized hardware range (50–250 kWh), preventing large-battery configs from dominating the replay buffer.
 
-**r_soc_target rationale**: rewards storing energy at its avoidance value (`buy_price` per kWh stored), making charging economically competitive with selling. At midday buy_price ≈ 9 UAH/kWh: charging earns ~+9×kWh while r_lcos costs -1.5×kWh → net +7.5 UAH/kWh, stronger than spot selling.
+**r_soc_soft below-target coefficient = 100.0**: raised from 25 to give a daily gap penalty of `-64` (normalized, 150 kWh battery, 10% below target over 96 steps) vs a single grid-charge step cost of `-90` — a margin of ~70% that SAC can reliably learn. At 25, the daily penalty was only `-16`, too weak to overcome charging cost.
+
+**r_preparation window = 6h**: extended from 3h so the agent receives the positive readiness signal early enough to act (charging a 150 kWh battery at C/2 takes ~40 min; the wider window ensures the reward is seen well before charging is needed).
+
+**r_soc_target rationale**: rewards solar-sourced charging at avoided-purchase value (`buy_price` per kWh stored). Grid charging is intentionally excluded — `r_market` already penalises the import cost, and including grid charging in `r_soc_target` would create a near-zero net signal that teaches free grid-charging. Fires whenever `solar_used_for_batt > 0` and `soc < target_soc` (no time gate).
+
+**DEFAULT_SOC_TARGET = 0.30**: Economic baseline SoC used when no outage is forecasted and as a floor in `_calc_target_soc()` so small outages never collapse the target to `soc_soft_min`.
 
 **r_waste**: penalizes discharging more than demand + available grid export headroom can absorb.
 
+**r_curtail**: penalizes free solar/battery surplus that is neither stored nor exported when the grid is up and more than 0.01 kWh is curtailed.
+
 ### `info` dict (returned by `step()`)
 
-`soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `battery_kwh` (+ = charging), `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`
+`soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `battery_kwh` (+ = charging), `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`, `reward_curtail`
 
 ---
 
-## Normalization Pipeline (`envoriment/normalize.py`)
+## Normalization Pipeline (`environment/normalize.py`)
 
 | Strategy | Columns |
 |---|---|
@@ -219,12 +237,12 @@ Run standalone: `python normalize.py --input dataset_final.csv --output dataset_
 
 ---
 
-## Standalone Training Script (`envoriment/train.py`)
+## Standalone Training Script (`environment/train.py`)
 
 Run from project root:
 
 ```bash
-cd /home/denys/PycharmProjects/ds_demo/ds_project_demo && .venv/bin/python envoriment/train.py
+cd /home/denys/PycharmProjects/ds_demo/ds_project_demo && .venv/bin/python environment/train.py
 ```
 
 ### Key design decisions
@@ -278,11 +296,11 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 | `models/obs_rms.pkl` | VecNormalize running stats — **required for inference** |
 | `logs/tensorboard/` | TensorBoard event files |
 
-View training: `tensorboard --logdir envoriment/logs/tensorboard/`
+View training: `tensorboard --logdir environment/logs/tensorboard/`
 
 ---
 
-## Inference Module (`envoriment/inference.py`)
+## Inference Module (`environment/inference.py`)
 
 ```python
 from environment.inference import load_model_and_scalers, run_inference
@@ -305,18 +323,18 @@ result = run_inference(
 # result = {'dispatch_plan': [...96 dicts...], 'summary': {...}}
 ```
 
-**`dispatch_plan`** per step includes: `step`, `action_battery`, `action_grid`, `soc`, `target_soc`, `solar_gen_kwh`, `solar_surplus_kwh`, `battery_kwh`, `grid_kwh`, `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward`, all 9 reward components.
+**`dispatch_plan`** per step includes: `step`, `action_battery`, `action_grid`, `soc`, `target_soc`, `solar_gen_kwh`, `solar_surplus_kwh`, `battery_kwh`, `grid_kwh`, `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward`, all 10 reward components.
 
 **Model cache**: In FastAPI, `prediction_service.py` holds a single `_cached_model: tuple | None` — the global SAC model is loaded once from `best/best_model.zip` and reused for all configs. No per-config training or per-config model files.
 
-**Standalone `__main__` mode** (`python envoriment/inference.py`):
+**Standalone `__main__` mode** (`python environment/inference.py`):
 - Calls `data_combiner.combine()` for live data; falls back to `combined.csv` if DAM unavailable
 - `--soc` arg is optional; if omitted, queries DB for last prediction SoC (clamped to `min_reserve`); defaults to 0.5 if DB unavailable
 - Args: `--model`, `--scalers`, `--obsrms`, `--config` (JSON), `--output`, `--soc`, `--tilt`, `--azimuth`
 
 ---
 
-## Default Strategy (`envoriment/default_strategy.py`)
+## Default Strategy (`environment/default_strategy.py`)
 
 Rule-based inverter dispatch with no price awareness — reacts only to solar irradiance, grid status, and SoC.
 
@@ -378,6 +396,8 @@ Returns `None` if DAM fetch fails. Always check for None before passing to infer
 | GET | `/strategy/list` | JWT | List all strategies for current user |
 | GET | `/predictions/` | JWT | Run SAC inference + store results. Params: `config_name`, `initial_soc`. Blocked before 14:00 UA time. |
 | GET | `/predictions/default` | JWT | Run default strategy + return results (not stored). Params: `config_name`, `strategy_name`, `initial_soc`. Blocked before 14:00 UA time. |
+| GET | `/predictions/history` | JWT | Retrieve stored SAC predictions. Params: `config_name`, `date` (optional, defaults to latest). |
+| GET | `/predictions/history/dates` | JWT | List all dates with stored predictions for a config. Param: `config_name`. |
 
 ### Response Models (Pydantic)
 
@@ -424,7 +444,7 @@ Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — 
 | `system_configs` | id, user_id (FK), config_name, settings (JSONB) |
 | `default_strategies` | id, user_id (FK), strategy_name, settings (JSONB) |
 | `history` | id, user_id (FK), timestamp, data (JSONB) |
-| `predictions` | id, user_id (FK), config_id (FK), date, step, timestamp + 30 physics/reward cols |
+| `predictions` | id, user_id (FK), config_id (FK), date, step, timestamp + 35 physics/reward cols (6 energy-flow cols always NULL — see issue #10) |
 
 `predictions` keyed by `config_id + date` — multiple configs per user don't collide.
 
@@ -436,6 +456,57 @@ Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — 
 - **`initial_soc`**: if omitted, read from DB (last step SoC of previous prediction for this config), clamped to `min_reserve`
 - **SAC predictions** (`GET /predictions/`): result stored to `predictions` table (96 rows per run)
 - **Default strategy** (`GET /predictions/default`): result returned only, not stored in DB
+- **History retrieval** (`GET /predictions/history`): reads stored rows; accepts optional `date` param, defaults to latest stored date
+- **History dates** (`GET /predictions/history/dates`): returns list of ISO date strings with stored predictions for a config
+
+---
+
+## Frontend (`frontend/`)
+
+### Stack
+- **Vite** + **React 18** + **Recharts** — single-page app, no router needed
+- All CSS is inlined as a JS string in `App.jsx` (no separate stylesheet) — Sora + JetBrains Mono fonts
+
+### Local dev
+```bash
+cd frontend
+cp .env.example .env        # set VITE_API_URL=http://localhost:8000
+npm install
+npm run dev                 # → http://localhost:3000
+```
+
+### Build for S3 deployment
+```bash
+npm run build               # outputs to frontend/dist/
+aws s3 sync dist/ s3://<bucket-name>/ --delete
+# Invalidate CloudFront cache after upload
+aws cloudfront create-invalidation --distribution-id <ID> --paths "/*"
+```
+
+### `src/api.js`
+All fetch calls with JWT handling. Token stored in `localStorage` under key `ems_token`. On 401, clears token and reloads page to show login screen. Reads `VITE_API_URL` env var at build time.
+
+### `src/App.jsx` — screens & components
+
+| Component | Description |
+|---|---|
+| `Login` | Login + Register tabs. POST `/auth/login` (form-urlencoded) → stores token |
+| `Sidebar` | Mode tabs (SAC / Default / Історія), config/strategy dropdowns (from API), initial SoC input, run button, CSV upload, logout |
+| `Kpis` | 4 KPI cards from `summary` object (earned, sold/bought, solar, unmet) |
+| `Charts` | SoC area chart (full width), Solar area chart, Grid bar chart (green=sell / red=buy) |
+| `Table` | Paginated dispatch table (20 rows/page) — timestamp, SoC bar, battery direction, grid badge, solar, load, DAM price, P&L |
+
+### Sidebar modes
+| Mode | What it runs | Stored to DB? |
+|---|---|---|
+| SAC | `GET /predictions/` | Yes |
+| Default | `GET /predictions/default` | No |
+| Історія | `GET /predictions/history` | Read-only |
+
+Config and strategy dropdowns auto-populate from `/config/list` and `/strategy/list` on login; refresh button re-fetches. If list is empty, falls back to a text input for manual entry. History dates auto-load from `/predictions/history/dates` when switching to history mode.
+
+### CSV upload (offline/demo mode)
+Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Handles both `solar_kwh` (API) and `solar_gen_kwh` (CSV) column names. KPIs are computed locally from the CSV rows.
 
 ---
 
@@ -446,12 +517,25 @@ Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — 
 | 1 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active |
 | 2 | `requirements.txt` | ✅ Fixed | All deps present: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
 | 3 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via DB (API) but no live BMS/inverter integration |
-| 4 | No `GET /predictions/history` | ❌ Open | SAC predictions stored in DB but no endpoint to retrieve past days |
+| 4 | `GET /predictions/history` | ✅ Fixed | Endpoints added: `/predictions/history` (by date) + `/predictions/history/dates` (list) |
 | 5 | SAC retraining required | ⚠️ Pending | Obs space changed to 98 dims — current best_model.zip is incompatible. Must retrain from scratch (20M steps). Run: `cd environment && ../.venv/bin/python train.py` |
 | 6 | `data_combiner.py` | ✅ Fixed | `get_solar_parameters()` now has try/except — no longer crashes when DB is down |
 | 7 | `inference.py __main__` | ✅ Fixed | Project root added to `sys.path` so `data_providers` import works when running directly |
 | 8 | `inference.py __main__` | ✅ Fixed | NaN guard added — aborts with clear error if DAM columns are all NaN instead of crashing PyTorch |
 | 9 | `combined.csv` | ⚠️ External | DAM_Price/Vol columns are NaN when OREE fetch fails — inference will abort cleanly but needs live DAM data to run |
+| 10 | `AgentPredictions` energy flow cols | ⚠️ Schema only | 6 columns (`solar_to_load_kwh`, `solar_to_battery_kwh`, `solar_to_grid_kwh`, `battery_to_load_kwh`, `grid_to_load_kwh`, `grid_to_battery_kwh`) in DB model but never populated by `_build_rows()` in `prediction_service.py` — always NULL |
+| 11 | `inference.py` | ✅ Fixed | `reward_curtail` now captured from `info` dict and included in dispatch plan; `_build_rows()` stores it |
+| 12 | `backend/models/site.py` | ✅ Fixed | `reward_curtail` column added to `AgentPredictions` — **existing DBs need `ALTER TABLE predictions ADD COLUMN reward_curtail FLOAT;`** |
+| 13 | `environment/environment.py` | ✅ Fixed | Discharge efficiency: DC request converted to chemical kWh (`chem_needed = energy_to_draw / η`) before clamping to `max_drawable`; SoC drain and DC output now physically consistent. Requires retraining. |
+| 14 | `data_combiner.py` | ✅ Fixed | Year-boundary timestamps: rollover detected via `(month, day) < (today.month, today.day)` — uses `today.year + 1` on Dec 31 → Jan 1 runs |
+| 15 | `environment/environment.py` | ✅ Fixed | Island-mode SoC over-drain: during outages battery was discharged at full requested rate (18 kWh/step) regardless of load (5-6 kWh/step), depleting SoC 3-4× too fast. Fixed by clamping `actual_draw = min(actual_draw, load_chem)` when `grid_status == 0`. Requires retraining. |
+| 16 | `environment/environment.py` | ✅ Fixed | r_waste never fired during outages: `grid_headroom` was computed as if grid were connected (18.75 kWh), making `wasted = 0` always during outages. Fixed: `grid_headroom = 0.0 if grid_status == 0 else ...`. Requires retraining. |
+| 17 | `environment/environment.py` | ✅ Fixed | Phantom SoC gain during outage: charging branch never checked grid_status, so battery received energy from a non-existent grid source during outages (SoC climbed with no solar/grid), and `grid_needed_for_batt` inflated `unmet_load` with phantom demand. Fixed by capping to solar-only when `grid_status == 0`. Requires retraining. |
+| 18 | `environment/environment.py` | ✅ Fixed | r_unmet multiplier too weak (2×): model regressed on unmet load at 20M steps (7,745 kWh) vs 10M steps (5,030 kWh) because other rewards dominated. Raised to 5× so unmet load is always the worst possible outcome. Requires retraining. |
+| 19 | `environment/environment.py` | ✅ Fixed | Price arbitrage backwards: model bought expensive (avg 5.65 UAH/kWh) and sold cheap (avg 4.50 UAH/kWh) despite having 32-step price lookahead in observation. Added `r_price_timing` component: bonus for selling above day-average price, penalty for buying above day-average price. Requires retraining. |
+| 20 | `environment/environment.py` | ✅ Fixed | r_price_timing coefficient 2.0 → 1.0: model was too aggressive at holding energy, causing r_curtail = -52k UAH/year and summer months going negative. Reduced coefficient keeps the buy-cheap/sell-expensive signal without over-holding. Requires retraining. |
+| 21 | `environment/environment.py` | ✅ Fixed | Price-timing buy penalty suppressed when outage imminent (hours_until_outage ≤ 3 and soc < target_soc): model delayed grid charging before outages to avoid price penalty, arriving underprepared. Now bypasses price check when pre-outage charging is urgent. Requires retraining. |
+| 22 | `environment/environment.py` | ✅ Fixed | r_lcos coefficient 1.2 → 1.4: model cycled battery excessively for arbitrage (LCOS 166k vs 131k in prior run). Higher coefficient discourages unnecessary cycling while still allowing profitable arbitrage. Requires retraining. |
 
 ---
 
@@ -465,122 +549,3 @@ python-dotenv, pwdlib, pydantic, scikit-learn, stable-baselines3, torch,
 tensorboard, openpyxl
 ```
 
----
-
-## AWS Deployment Architecture
-
-### Decisions made
-
-- **Database**: Amazon RDS (PostgreSQL) — not S3. S3 is object storage (no SQL queries, no transactions, no foreign keys). RDS is identical to local PostgreSQL — only `DATABASE_URL` in `.env` changes, zero code changes required.
-- **Application hosting**: ECS (Elastic Container Service) — AWS-managed container orchestrator, replaces `docker-compose`.
-- **Image registry**: ECR (Elastic Container Registry) — private Docker registry inside AWS; ECS pulls from here automatically.
-- **API Gateway**: planned in front of ECS for CORS handling, SSL, and rate limiting. Not yet set up.
-- **CORS**: `CORSMiddleware` with `allow_origins=["*"]` kept in `backend/main.py` until API Gateway is in place. Once API Gateway is configured, remove `CORSMiddleware` entirely — API Gateway handles it at the AWS level.
-- **Region**: `eu-north-1` (Stockholm)
-- **AWS Account ID**: `287528889753`
-
-### Target architecture
-
-```
-Browser
-    │
-    ▼
-API Gateway  ← handles CORS, SSL, rate limiting  [⏳ not yet set up]
-    │
-    ▼
-ECS (FastAPI container)  ← pulls image from ECR
-    │  ├── RDS PostgreSQL (private VPC, port 5432)
-    │  ├── OREE (oree.com.ua) — DAM prices
-    │  └── Open-Meteo — weather forecast
-```
-
-### Deployment path (ECR + ECS + RDS)
-
-```
-Local machine                  AWS
-──────────────                 ──────────────────────────
-docker build .      →push→     ECR  (image registry)
-                                    │
-                               ECS  (runs containers, replaces docker-compose)
-                                    │
-                               RDS  (PostgreSQL, private subnet)
-```
-
-- **ECR** = AWS Docker image registry (like Docker Hub but private, zero transfer cost within AWS)
-- **ECS** = AWS container orchestrator (replaces `docker-compose` in production)
-- **RDS** = managed PostgreSQL — only `DATABASE_URL` changes vs local dev
-
-### ECR push commands (actual, eu-north-1)
-
-```bash
-# 1. Authenticate Docker to ECR
-aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 287528889753.dkr.ecr.eu-north-1.amazonaws.com
-
-# 2. Build image (from project root)
-docker build -t ems-api .
-
-# 3. Tag for ECR
-docker tag ems-api:latest 287528889753.dkr.ecr.eu-north-1.amazonaws.com/ems-api:latest
-
-# 4. Push
-docker push 287528889753.dkr.ecr.eu-north-1.amazonaws.com/ems-api:latest
-```
-
-### Security Groups (created)
-
-| Name | Attached to | Rule |
-|---|---|---|
-| `ems-app-sg` | ECS task | Inbound TCP 8000 from `0.0.0.0/0` |
-| `ems-db-sg` | RDS | Inbound TCP 5432 from `ems-app-sg` only |
-
-### RDS instance settings (actual)
-
-| Setting | Value | Notes |
-|---|---|---|
-| Instance name | `ems-db` | |
-| Engine | PostgreSQL 18.3 | Latest available at creation time |
-| Instance | `db.t3.micro` | Free tier eligible ($0 for 12 months) |
-| Storage | 20 GB gp2 | |
-| Multi-AZ | No | Single-AZ, Dev/Test template |
-| Public access | No | Private VPC only |
-| Security group | `ems-db-sg` | Port 5432 from `ems-app-sg` only |
-| Initial DB name | `postgres` | Required — tables auto-created by SQLAlchemy on first start |
-
-**RDS endpoint**: retrieve from RDS console → `ems-db` → Connectivity & security → Endpoint.
-
-### What changes when going from local → AWS
-
-| Item | Local | AWS |
-|---|---|---|
-| `DATABASE_URL` | `postgresql://postgres:pass@localhost:5433/postgres` | `postgresql://postgres:<pass>@<rds-endpoint>:5432/postgres` |
-| DB tables | Created by `Base.metadata.create_all()` on startup | Same — auto-created on first ECS task start |
-| Model files | Local disk (in git, ~3 MB) | Bundled into Docker image via `COPY . .` in Dockerfile |
-| App process | `docker-compose up` | ECS service (task definition + service) |
-
-### Files added for deployment
-
-| File | Purpose |
-|---|---|
-| `Dockerfile` | Builds the FastAPI app image (CPU torch, python 3.13-slim) |
-| `.dockerignore` | Excludes `.venv`, logs, datasets from build context |
-| `docker-compose.yml` | Updated: app service added, MinIO removed (not used in code) |
-| `.env.example` | Documents all required env vars; use `db` as DB host inside docker-compose |
-
-### Local dev vs docker-compose DATABASE_URL
-
-- **Running locally** (outside Docker): `DATABASE_URL=postgresql://postgres:pass@localhost:5433/postgres`
-- **Running via docker-compose**: `DATABASE_URL=postgresql://postgres:pass@db:5432/postgres` — use service name `db`, internal port `5432` (not the mapped `5433`)
-- **Running on ECS**: `DATABASE_URL=postgresql://postgres:<pass>@<rds-endpoint>:5432/postgres` — set as environment variable in ECS task definition
-
-### Current deployment status (2026-05-20)
-
-| Step | Status | Notes |
-|---|---|---|
-| Security groups | ✅ Done | `ems-app-sg` + `ems-db-sg` created |
-| RDS PostgreSQL | ✅ Done | `ems-db` provisioned, eu-north-1, free tier |
-| ECR repository | ✅ Done | `ems-api` created at `287528889753.dkr.ecr.eu-north-1.amazonaws.com/ems-api` |
-| AWS CLI install | ✅ Done | v2.34.50 installed via apt |
-| AWS CLI credentials | 🔄 In progress | Running `aws configure` with IAM access key |
-| Docker image push | ⏳ Pending | Build + push to ECR once CLI configured |
-| ECS cluster | ⏳ Pending | Create cluster → task definition → service |
-| API Gateway | ⏳ Pending | SSL + CORS — after ECS is working |
