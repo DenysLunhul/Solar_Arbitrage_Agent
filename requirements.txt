@@ -19,3 +19,4 @@ stable-baselines3
 torch
 tensorboard
 openpyxl
+pymodbus>=3.6

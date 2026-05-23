@@ -17,23 +17,22 @@ except ImportError:
 
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
-        'capacity_kwh':        200.0,
-        'max_charge_power':    150,
-        'max_discharge_power': 150,
+        'capacity_kwh':        250.0,
+        'max_charge_power':    125.0,
+        'max_discharge_power': 125.0,
         'efficiency':          0.95,
         'lcos':                1.15,
         'min_reserve':         20,
     },
     'solar': {
-        'peak_power':  150.0,
-        'efficiency':  0.23,
+        'peak_power':  250.0,
+        'efficiency':  0.20,
     },
     'inverter': {
-        'max_power':    100.0,
-        'efficiency': 0.95,
+        'max_power': 250.0,
     },
     'grid': {
-        'capacity': 150.0,
+        'capacity': 250.0,
     },
 }
 

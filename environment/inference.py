@@ -146,10 +146,10 @@ def run_inference(
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
         'capacity_kwh':        250.0,
-        'max_charge_power':    150.0,
-        'max_discharge_power': 150.0,
+        'max_charge_power':    125.0,   # C/2 — matches training distribution
+        'max_discharge_power': 125.0,   # C/2 — matches training distribution
         'efficiency':          0.95,
-        'lcos':                1.5,
+        'lcos':                1.15,    # within training range [0.95, 1.25]
         'min_reserve':         20,
     },
     'solar': {
