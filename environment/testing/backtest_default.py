@@ -97,7 +97,8 @@ def run(
     dispatch_df = dispatch_df[col_order]
 
     sum_cols = ['date', 'initial_soc', 'final_soc', 'total_money_earned',
-                'solar_kwh', 'bought_kwh', 'sold_kwh', 'unmet_load_kwh', 'lcos_total_uah', 'steps']
+                'economic_savings_uah', 'solar_kwh', 'bought_kwh', 'sold_kwh',
+                'unmet_load_kwh', 'lcos_total_uah', 'steps']
     summary_df = summary_df[[c for c in sum_cols if c in summary_df.columns]]
 
     return dispatch_df, summary_df
@@ -125,7 +126,9 @@ if __name__ == '__main__':
     print("\n" + "=" * 60)
     print("DEFAULT STRATEGY — OVERALL RESULTS (365 days)")
     print("=" * 60)
-    print(f"  Total earned:      {summary_df['total_money_earned'].sum():>12.2f} UAH")
+    print(f"  Grid cash flow:    {summary_df['total_money_earned'].sum():>12.2f} UAH  (sell - buy)")
+    if 'economic_savings_uah' in summary_df.columns:
+        print(f"  Economic savings:  {summary_df['economic_savings_uah'].sum():>12.2f} UAH  (vs grid-only baseline)")
     print(f"  Solar generated:   {summary_df['solar_kwh'].sum():>12.1f} kWh")
     print(f"  Grid bought:       {summary_df['bought_kwh'].sum():>12.1f} kWh")
     print(f"  Grid sold:         {summary_df['sold_kwh'].sum():>12.1f} kWh")

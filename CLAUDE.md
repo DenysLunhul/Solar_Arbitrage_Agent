@@ -186,22 +186,26 @@ SoC is randomized uniformly on each reset: `self.soc = uniform(0.0, 1.0)`.
 ### Reward Function (10 components, all tracked separately in `info`)
 
 ```
-r_market      = |grid_export| × (DAM_price/1000)  OR  grid_import × -(DAM_price/1000 + 3.0)
-r_lcos        = -(1.2 × lcos × |batt_energy_cycled|)
-r_unmet       = -(unmet_load × (DAM_price/1000 + 3.0) × 2)          # if unmet_load > 0
-r_mismatch    = 0.0                                                   # disabled (kept in info for compat)
-r_soc_soft    = -(50.0 × violation²)                                 # outside [soc_min, 0.80]
-              + -(100.0 × (target_soc - soc)²)                       # below target (grid up only)
-r_reserve     = -(50.0 × soc_deficit × log1p(outage_remaining_h))   # during outage
-r_preparation = 20.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage (≤6 h)
-r_soc_target  = solar_chem_stored × buy_price                        # solar-sourced charging while soc < target_soc
-r_waste       = -(10.0 × lcos × wasted_kWh)                         # discharge exceeding demand + grid headroom
-r_curtail     = -(curtailed_kWh × curr_price)                        # free export surplus not stored or exported (grid up)
+r_market         = |grid_export| × (DAM_price/1000)  OR  grid_import × -(DAM_price/1000 + 3.0)
+r_lcos           = -(2.5 × lcos × |batt_energy_cycled|)
+r_unmet          = -(unmet_load × (DAM_price/1000 + 3.0) × 5)        # if unmet_load > 0
+r_mismatch       = 0.0                                                 # disabled (kept in info for compat)
+r_soc_soft       = -(50.0 × violation²)                               # outside [soc_min, 0.80]
+                 + -(100.0 × (target_soc - soc)²)                     # below target (grid up only)
+r_reserve        = -(50.0 × soc_deficit × log1p(outage_remaining_h)) # during outage
+r_preparation    = 20.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage (≤6 h)
+r_soc_target     = solar_chem_stored × buy_price                      # solar-sourced charging while soc < target_soc
+r_waste          = -(10.0 × lcos × wasted_kWh)                       # discharge exceeding demand + grid headroom
+r_curtail        = -(curtailed_kWh × curr_price × 3.0)               # solar surplus discarded, not stored or exported (grid up)
+r_solar_priority = -(grid_needed_for_batt × solar_fraction × curr_price × 2.0)  # grid charging while solar active (non-outage, load imports excluded)
+r_price_timing   = ±price_dev × |grid_kwh| × 1.0                    # bonus sell-high / penalty buy-high
 
 reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalized by capacity
 ```
 
 **Reward normalization**: dividing by `capacity / 100` keeps reward magnitude consistent across the domain-randomized hardware range (50–250 kWh), preventing large-battery configs from dominating the replay buffer.
+
+**r_lcos coefficient = 2.5**: raised from 1.4 after backtest showed 1.33 cycles/day (target ≤ 1.0) and 166k UAH LCOS/year. Each kWh cycled through a 150 kWh battery costs `2.5 × 1.15 / 1.5 = 1.92` in normalized reward — comparable to the r_market benefit from arbitrage, making unnecessary cycling unprofitable.
 
 **r_soc_soft below-target coefficient = 100.0**: raised from 25 to give a daily gap penalty of `-64` (normalized, 150 kWh battery, 10% below target over 96 steps) vs a single grid-charge step cost of `-90` — a margin of ~70% that SAC can reliably learn. At 25, the daily penalty was only `-16`, too weak to overcome charging cost.
 
@@ -213,11 +217,13 @@ reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalize
 
 **r_waste**: penalizes discharging more than demand + available grid export headroom can absorb.
 
-**r_curtail**: penalizes free solar/battery surplus that is neither stored nor exported when the grid is up and more than 0.01 kWh is curtailed.
+**r_curtail multiplier = 3.0×**: raised from 1.0× because the model was discarding ~10k kWh/year of solar surplus. Solar lost at the current step cannot be recovered at a better price later; the 3× multiplier ensures curtailment always costs more in reward than any `r_price_timing` gain from holding.
+
+**r_solar_priority**: penalizes grid-sourced battery charging while solar is simultaneously active (> 0.1 kWh/step). Only fires when `grid_needed_for_batt > 0.01` — load-driven imports are excluded. Coefficient 2.0 × solar_fraction × curr_price × grid_needed_for_batt. Suppressed when outage is imminent (`hours_until_outage ≤ 3` and `soc < target_soc`). Backtest found 46.6% of all grid buying (69k kWh/year) happened during daylight, buying expensive grid power (8 UAH/kWh) while free solar was available.
 
 ### `info` dict (returned by `step()`)
 
-`soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `battery_kwh` (+ = charging), `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`, `reward_curtail`
+`soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `battery_kwh` (+ = charging), `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`, `reward_curtail`, `reward_price_timing`, `reward_solar_priority`
 
 ---
 
@@ -271,21 +277,25 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 
 ### Configuration
 
-| Parameter | Value |
-|---|---|
-| Algorithm | SAC (MlpPolicy) |
-| Total timesteps | 20 000 000 |
-| Buffer size | 1 000 000 |
-| Batch size | 512 |
-| Learning rate | 3e-4 |
-| Network arch | [512, 512] |
-| n_envs | 32 (DummyVecEnv) |
-| n_eval_episodes | 20 |
-| Gamma | 0.99 |
-| Entropy coef | auto |
-| Eval frequency | every 100 000 env steps |
-| Seed | 42 (numpy + SAC) |
-| Device | cuda |
+| Parameter | Value | Note |
+|---|---|---|
+| Algorithm | SAC (MlpPolicy) | |
+| Total timesteps | 15 000 000 | reduced from 20M; model_9 peaked at 5.9M so 15M gives headroom |
+| Buffer size | 1 000 000 | |
+| Batch size | 512 | |
+| Learning rate | 1e-4 | lowered from 3e-4 to prevent overconfident early critic |
+| Target entropy | -1.0 | explicit; 'auto'=−2 allowed near-deterministic collapse |
+| Tau | 0.002 | lowered from 0.005 for more stable target network |
+| Learning starts | 50 000 | raised from 10k — gives ~16 full episodes before first update |
+| Clip reward | 100.0 | raised from 10.0 — 10.0 clipped r_unmet peaks (−587) to −10, losing signal |
+| Network arch | [512, 512] | |
+| n_envs | 32 (DummyVecEnv) | |
+| n_eval_episodes | 20 | |
+| Gamma | 0.99 | |
+| Entropy coef | auto | |
+| Eval frequency | every 100 000 env steps | |
+| Seed | 42 (numpy + SAC) | |
+| Device | cuda | |
 
 ### Outputs
 
@@ -518,7 +528,7 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 | 2 | `requirements.txt` | ✅ Fixed | All deps present: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
 | 3 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via DB (API) but no live BMS/inverter integration |
 | 4 | `GET /predictions/history` | ✅ Fixed | Endpoints added: `/predictions/history` (by date) + `/predictions/history/dates` (list) |
-| 5 | SAC retraining required | ⚠️ Pending | Obs space changed to 98 dims — current best_model.zip is incompatible. Must retrain from scratch (20M steps). Run: `cd environment && ../.venv/bin/python train.py` |
+| 5 | SAC retraining required | ⚠️ Pending | model_10 retrain in progress (see issues #28–#30). Run: `cd environment && ../.venv/bin/python train.py` |
 | 6 | `data_combiner.py` | ✅ Fixed | `get_solar_parameters()` now has try/except — no longer crashes when DB is down |
 | 7 | `inference.py __main__` | ✅ Fixed | Project root added to `sys.path` so `data_providers` import works when running directly |
 | 8 | `inference.py __main__` | ✅ Fixed | NaN guard added — aborts with clear error if DAM columns are all NaN instead of crashing PyTorch |
@@ -536,6 +546,14 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 | 20 | `environment/environment.py` | ✅ Fixed | r_price_timing coefficient 2.0 → 1.0: model was too aggressive at holding energy, causing r_curtail = -52k UAH/year and summer months going negative. Reduced coefficient keeps the buy-cheap/sell-expensive signal without over-holding. Requires retraining. |
 | 21 | `environment/environment.py` | ✅ Fixed | Price-timing buy penalty suppressed when outage imminent (hours_until_outage ≤ 3 and soc < target_soc): model delayed grid charging before outages to avoid price penalty, arriving underprepared. Now bypasses price check when pre-outage charging is urgent. Requires retraining. |
 | 22 | `environment/environment.py` | ✅ Fixed | r_lcos coefficient 1.2 → 1.4: model cycled battery excessively for arbitrage (LCOS 166k vs 131k in prior run). Higher coefficient discourages unnecessary cycling while still allowing profitable arbitrage. Requires retraining. |
+| 23 | `environment/environment.py` | ✅ Fixed | r_lcos coefficient raised 1.4 → 2.5: backtest shows 1.33 cycles/day (target ≤ 1.0) and 166k UAH LCOS/year. Stronger penalty required to suppress excessive cycling. Requires retraining. |
+| 24 | `environment/environment.py` | ✅ Fixed | r_curtail multiplier 1.0× → 3.0×: model curtails ~10k kWh/year of solar because r_price_timing bonus for holding outweighs the curtailment loss. 3× penalty ensures discarded solar always costs more than any timing gain. Requires retraining. |
+| 25 | `environment/environment.py` | ✅ Fixed | Added r_solar_priority: 46.6% of grid buying (69k kWh/year) happened during daylight when solar was active, wasting free solar and inflating grid costs. New component penalizes grid import proportional to concurrent solar fraction. Bypassed when outage is imminent. Requires retraining. |
+| 26 | `environment/inference.py`, `default_strategy.py` | ✅ Fixed | Misleading `total_money_earned` metric: showed −614k UAH but the system actually saved +1.47M UAH vs grid-only (81% self-sufficiency). Added `economic_savings_uah` = cash_flow + solar_self_consumed × avg_buy_price − LCOS to both SAC and default strategy summaries. |
+| 27 | Hardware sizing | ⚠️ Physical limit | December/January unmet load (Dec: 73 kWh/day, Jan: 41 kWh/day) is a fundamental hardware constraint: solar generates only 229 kWh/day in December but load is 781 kWh/day, and the 150 kWh battery cannot bridge a 552 kWh/day deficit during outages (6.68 h/day in December). Cannot be fixed with reward tuning; requires larger battery (400+ kWh) or accepting winter grid dependency. |
+| 28 | `environment/train.py` | ✅ Fixed | SAC entropy collapse: both model_7 (SAC_69) and model_8 (SAC_70) had alpha crash to ~0.0006 by step 600k. Root causes: `target_entropy='auto'` (=-2, too permissive), `lr=3e-4` (overconfident critic), `learning_starts=10k` (only 312 steps/env before first update), `tau=0.005`, `clip_reward=10.0` (clipped r_unmet peaks of −587 to −10). Fixed: `target_entropy=-1.0`, `lr=1e-4`, `learning_starts=50k`, `tau=0.002`, `clip_reward=100.0`. |
+| 29 | `environment/environment.py` | ✅ Fixed | r_lcos coefficient 2.5 → 4.0 overcorrected: model_9 hit 0.989 cycles/day but curtailed 28,475 kWh/year (vs ~10k for model_7) because the agent refused profitable cycles, wasting free solar. Economic savings dropped from 1.47M (model_7) to 483k UAH. Rolled back to 2.5 — the goal is economically optimal cycling, not minimizing cycle count at any cost. |
+| 30 | `environment/models/best/` | ⚠️ Pending | **Model_10 retrain required.** Fixes from #28 and #29 are applied; training must complete before API serves correct predictions. Archived models in `temp/`: `best_model_9_lcos4.zip` (model_9, r_lcos=4.0, economic_savings=483k UAH). Run: `cd environment && ../.venv/bin/python train.py` |
 
 ---
 

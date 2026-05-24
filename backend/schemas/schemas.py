@@ -116,15 +116,16 @@ class DispatchStep(BaseModel):
 
 
 class DispatchSummary(BaseModel):
-    total_money_earned: float
-    bought_kwh:         float
-    sold_kwh:           float
-    solar_kwh:          float
-    unmet_load_kwh:     float
-    lcos_total_uah:     float
-    initial_soc:        float
-    final_soc:          float
-    steps:              int
+    total_money_earned:   float
+    economic_savings_uah: float | None = None
+    bought_kwh:           float
+    sold_kwh:             float
+    solar_kwh:            float
+    unmet_load_kwh:       float
+    lcos_total_uah:       float
+    initial_soc:          float
+    final_soc:            float
+    steps:                int
 
 
 class PredictionResponse(BaseModel):

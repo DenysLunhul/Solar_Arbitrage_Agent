@@ -121,25 +121,47 @@ def run_inference(
             'reward_reserve':    round(float(info['reward_reserve']), 4),
             'reward_preparation':round(float(info['reward_preparation']), 4),
             'reward_soc_target': round(float(info['reward_soc_target']), 4),
-            'reward_waste':      round(float(info['reward_waste']), 4),
-            'reward_curtail':      round(float(info['reward_curtail']), 4),
-            'reward_price_timing': round(float(info['reward_price_timing']), 4),
+            'curtailed_kwh':          round(float(info['curtailed_kwh']), 4),
+            'reward_waste':           round(float(info['reward_waste']), 4),
+            'reward_curtail':         round(float(info['reward_curtail']), 4),
+            'reward_price_timing':    round(float(info['reward_price_timing']), 4),
+            'reward_solar_priority':  round(float(info['reward_solar_priority']), 4),
         })
 
         if terminated or truncated:
             break
 
+    _total_money_earned = round(sum(x['money_earned_ts'] for x in dispatch_plan))
+    _bought_kwh  = round(sum(x['grid_kwh'] for x in dispatch_plan if x['grid_kwh'] > 0), 3)
+    _sold_kwh    = round(sum(abs(x['grid_kwh']) for x in dispatch_plan if x['grid_kwh'] < 0), 3)
+    _solar_kwh   = round(sum(x['solar_gen_kwh'] for x in dispatch_plan), 3)
+    _lcos_uah    = round(sum(x['lcos_cost'] for x in dispatch_plan), 3)
+
+    # Avg price paid when buying (UAH/kWh) — used for solar-savings estimate.
+    _total_bought_cost = sum(-x['money_earned_ts'] for x in dispatch_plan if x['grid_kwh'] > 0)
+    _avg_buy_price     = (_total_bought_cost / _bought_kwh) if _bought_kwh > 0 else 8.0
+
+    # Economic savings vs a hypothetical grid-only baseline (no solar/battery).
+    # Curtailed solar is excluded — it was neither self-consumed nor sold.
+    _curtailed_kwh       = round(sum(x['curtailed_kwh'] for x in dispatch_plan), 3)
+    _solar_self_consumed = max(0.0, _solar_kwh - _sold_kwh - _curtailed_kwh)
+    _economic_savings    = round(
+        _total_money_earned + _solar_self_consumed * _avg_buy_price - _lcos_uah, 2
+    )
+
     summary = {
-        'total_money_earned': round(sum(x['money_earned_ts'] for x in dispatch_plan)),
-        'total_reward_uah': round(sum(x['reward'] for x in dispatch_plan), 2),
-        'bought_kwh':       round(sum(x['grid_kwh'] for x in dispatch_plan if x['grid_kwh'] > 0), 3),
-        'sold_kwh':         round(sum(abs(x['grid_kwh']) for x in dispatch_plan if x['grid_kwh'] < 0), 3),
-        'solar_kwh':        round(sum(x['solar_gen_kwh'] for x in dispatch_plan), 3),
-        'unmet_load_kwh':   round(sum(x['unmet_load_kwh'] for x in dispatch_plan), 4),
-        'lcos_total_uah':   round(sum(x['lcos_cost'] for x in dispatch_plan), 3),
-        'initial_soc':      round(initial_soc, 3),
-        'final_soc':        dispatch_plan[-1]['soc'] if dispatch_plan else initial_soc,
-        'steps':            len(dispatch_plan),
+        'total_money_earned':  _total_money_earned,
+        'economic_savings_uah': _economic_savings,
+        'total_reward_uah':    round(sum(x['reward'] for x in dispatch_plan), 2),
+        'bought_kwh':          _bought_kwh,
+        'sold_kwh':            _sold_kwh,
+        'solar_kwh':           _solar_kwh,
+        'curtailed_kwh':       _curtailed_kwh,
+        'unmet_load_kwh':      round(sum(x['unmet_load_kwh'] for x in dispatch_plan), 4),
+        'lcos_total_uah':      _lcos_uah,
+        'initial_soc':         round(initial_soc, 3),
+        'final_soc':           dispatch_plan[-1]['soc'] if dispatch_plan else initial_soc,
+        'steps':               len(dispatch_plan),
     }
 
     return {'dispatch_plan': dispatch_plan, 'summary': summary}

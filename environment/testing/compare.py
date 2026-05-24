@@ -37,13 +37,14 @@ def main():
     print("=" * 65)
 
     metrics = [
-        ('Total earned (UAH)',     'total_money_earned', True),
-        ('Avg daily earned (UAH)', None,                 True),
-        ('Solar generated (kWh)',  'solar_kwh',          None),
-        ('Grid bought (kWh)',      'bought_kwh',         False),
-        ('Grid sold (kWh)',        'sold_kwh',           True),
-        ('Unmet load (kWh)',       'unmet_load_kwh',     False),
-        ('LCOS cost (UAH)',        'lcos_total_uah',     False),
+        ('Grid cash flow (UAH)',       'total_money_earned',   True),
+        ('Economic savings (UAH)',     'economic_savings_uah', True),
+        ('Avg daily cash flow (UAH)',  None,                   True),
+        ('Solar generated (kWh)',      'solar_kwh',            None),
+        ('Grid bought (kWh)',          'bought_kwh',           False),
+        ('Grid sold (kWh)',            'sold_kwh',             True),
+        ('Unmet load (kWh)',           'unmet_load_kwh',       False),
+        ('LCOS cost (UAH)',            'lcos_total_uah',       False),
     ]
 
     for label, col, higher_is_better in metrics:

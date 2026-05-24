@@ -21,7 +21,7 @@ CONFIG = {
     'tensorboard_dir': 'logs/tensorboard/',
     'monitor_dir':     'logs/monitor/',
 
-    'total_timesteps': 20_000_000,
+    'total_timesteps': 15_000_000,
     'eval_freq':       100_000,
     'log_interval':    100_000,  # large value — suppress SB3 default episode logging
     'n_envs':          32,       # DummyVecEnv: no IPC overhead, env step ~0.11 ms each
@@ -29,20 +29,18 @@ CONFIG = {
     'sac_params': {
         'device':          'cuda',
         'buffer_size':     1_000_000,
-        'learning_starts': 10_000,   # ~6 full episodes across 16 envs before first update
+        'learning_starts': 50_000,   # 50k / 32 envs ≈ 1562 steps/env (~16 full episodes) before first update
         'batch_size':      512,
-        'learning_rate':   3e-4,
+        'learning_rate':   1e-4,     # 3e-4 caused overconfident early critic, contributing to entropy collapse
         'gamma':           0.99,
-        'tau':             0.005,
+        'tau':             0.002,    # slower target-net update → more stable critic
         'ent_coef':        'auto',
         'policy_kwargs': {
             'net_arch': [512, 512],
         },
         'verbose': 0,
         'seed':    42,
-        'target_entropy': 'auto',
-        'use_sde':        True,
-        'sde_sample_freq': 8,
+        'target_entropy': -1.0,     # explicit: 'auto'=-2 allows near-deterministic collapse; -1.0 keeps policy stochastic
     }
 }
 
@@ -154,7 +152,7 @@ def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
         )
     ])
 
-    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=100.0)  # 10.0 clipped r_unmet events (-587 norm) to -10, losing signal; 100.0 preserves differentiation
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     return train_env, eval_env
@@ -208,20 +206,29 @@ class StatsCallback(BaseCallback):
 
 
 class SyncNormalizeEvalCallback(EvalCallback):
-    """EvalCallback that copies obs_rms from train_env → eval_env before each evaluation.
+    """EvalCallback that copies obs_rms from train_env → eval_env before each evaluation,
+    and saves obs_rms to disk whenever a new best_model.zip is written.
 
-    Without this, train and eval VecNormalize instances diverge over time, making
-    the Q-function evaluate against a different observation distribution than it was
-    trained on. The copy is shallow-cloned so train_env continues updating its own stats.
+    Without the sync, train and eval VecNormalize instances diverge over time.
+    Without saving obs_rms at the best checkpoint, inference uses end-of-training
+    normalisation stats against mid-training weights — a distribution mismatch.
     """
-    def __init__(self, train_env: VecNormalize, *args, **kwargs):
+    def __init__(self, train_env: VecNormalize, obs_rms_path: str, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._train_env = train_env
+        self._train_env   = train_env
+        self._obs_rms_path = obs_rms_path
+        self._prev_best   = -np.inf
 
     def _on_step(self) -> bool:
         if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
             self.eval_env.obs_rms = copy.deepcopy(self._train_env.obs_rms)
-        return super()._on_step()
+        result = super()._on_step()
+        # Save obs_rms at the exact step where best_model.zip was written.
+        if self.best_mean_reward > self._prev_best:
+            self._prev_best = self.best_mean_reward
+            with open(self._obs_rms_path, 'wb') as f:
+                pickle.dump(self._train_env.obs_rms, f)
+        return result
 
 
 def make_callbacks(train_env, eval_env):
@@ -230,6 +237,7 @@ def make_callbacks(train_env, eval_env):
 
     eval_cb = SyncNormalizeEvalCallback(
         train_env=train_env,
+        obs_rms_path='models/obs_rms.pkl',
         eval_env=eval_env,
         best_model_save_path=os.path.join('models', 'best'),
         log_path=os.path.join('logs', 'eval'),
@@ -308,11 +316,6 @@ if __name__ == '__main__':
     model = make_model(train_env)
     callbacks = make_callbacks(train_env, eval_env)
     model = train(model, callbacks)
-
-    obs_rms_path = 'models/obs_rms.pkl'
-    with open(obs_rms_path, 'wb') as f:
-        pickle.dump(train_env.obs_rms, f)
-    print(f"obs_rms → {obs_rms_path}")
 
     save_and_test(model, eval_env)
 

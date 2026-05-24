@@ -143,22 +143,37 @@ def generate_dispatch_plan(
             'grid_kwh':          round(float(info['actual_grid_kwh']), 4),
             'unmet_load_kwh':    round(float(info['unmet_load_kwh']), 4),
             'lcos_cost':         round(float(info['lcos_cost']), 4),
+            'curtailed_kwh':     round(float(info['curtailed_kwh']), 4),
             'money_earned_ts':   round(float(info['money_earned_ts']), 4),
         })
 
         if terminated or truncated:
             break
 
+    _total_money = round(sum(s['money_earned_ts'] for s in dispatch_plan), 2)
+    _bought_kwh  = round(sum(s['grid_kwh'] for s in dispatch_plan if s['grid_kwh'] > 0), 3)
+    _sold_kwh    = round(sum(abs(s['grid_kwh']) for s in dispatch_plan if s['grid_kwh'] < 0), 3)
+    _solar_kwh   = round(sum(s['solar_gen_kwh'] for s in dispatch_plan), 3)
+    _lcos_uah    = round(sum(s['lcos_cost'] for s in dispatch_plan), 3)
+
+    _total_bought_cost = sum(-s['money_earned_ts'] for s in dispatch_plan if s['grid_kwh'] > 0)
+    _avg_buy_price     = (_total_bought_cost / _bought_kwh) if _bought_kwh > 0 else 8.0
+    _curtailed_kwh     = round(sum(s['curtailed_kwh'] for s in dispatch_plan), 3)
+    _solar_self        = max(0.0, _solar_kwh - _sold_kwh - _curtailed_kwh)
+    _economic_savings  = round(_total_money + _solar_self * _avg_buy_price - _lcos_uah, 2)
+
     summary = {
-        'total_money_earned': round(sum(s['money_earned_ts'] for s in dispatch_plan), 2),
-        'bought_kwh':         round(sum(s['grid_kwh'] for s in dispatch_plan if s['grid_kwh'] > 0), 3),
-        'sold_kwh':           round(sum(abs(s['grid_kwh']) for s in dispatch_plan if s['grid_kwh'] < 0), 3),
-        'solar_kwh':          round(sum(s['solar_gen_kwh'] for s in dispatch_plan), 3),
-        'unmet_load_kwh':     round(sum(s['unmet_load_kwh'] for s in dispatch_plan), 4),
-        'lcos_total_uah':     round(sum(s['lcos_cost'] for s in dispatch_plan), 3),
-        'initial_soc':        round(initial_soc, 3),
-        'final_soc':          dispatch_plan[-1]['soc'] if dispatch_plan else initial_soc,
-        'steps':              len(dispatch_plan),
+        'total_money_earned':  _total_money,
+        'economic_savings_uah': _economic_savings,
+        'bought_kwh':          _bought_kwh,
+        'sold_kwh':            _sold_kwh,
+        'solar_kwh':           _solar_kwh,
+        'curtailed_kwh':       _curtailed_kwh,
+        'unmet_load_kwh':      round(sum(s['unmet_load_kwh'] for s in dispatch_plan), 4),
+        'lcos_total_uah':      _lcos_uah,
+        'initial_soc':         round(initial_soc, 3),
+        'final_soc':           dispatch_plan[-1]['soc'] if dispatch_plan else initial_soc,
+        'steps':               len(dispatch_plan),
     }
 
     if output_file:

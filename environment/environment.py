@@ -234,13 +234,14 @@ class Environment(gym.Env):
             if net_demand_after_batt > 0:
                 unmet_load = net_demand_after_batt
 
-        r_market      = 0.0
-        r_unmet       = 0.0
-        r_soc_soft    = 0.0
-        r_reserve     = 0.0
-        r_preparation = 0.0
-        r_soc_target  = 0.0
-        r_curtail     = 0.0
+        r_market         = 0.0
+        r_unmet          = 0.0
+        r_soc_soft       = 0.0
+        r_reserve        = 0.0
+        r_preparation    = 0.0
+        r_soc_target     = 0.0
+        r_curtail        = 0.0
+        r_solar_priority = 0.0
 
         if actual_grid_ts > 0:
             r_market = -actual_grid_ts * buy_price
@@ -253,7 +254,7 @@ class Environment(gym.Env):
             money_earned_ts = -actual_grid_ts * buy_price         # cost of buying (negative)
 
         lcos_cost = self.lcos * actual_batt_energy_abs
-        r_lcos    = -1.4 * lcos_cost
+        r_lcos    = -2.5 * lcos_cost
 
         if unmet_load > 0:
             r_unmet = -unmet_load * buy_price * 5
@@ -308,12 +309,14 @@ class Environment(gym.Env):
 
         # Solar curtailment: penalise free surplus that is neither stored nor exported.
         # The environment requires an explicit export action; a passive action[1]≤0 silently
-        # discards the surplus. Full curr_price penalty = foregone revenue per kWh curtailed.
+        # discards the surplus. 3× curr_price: solar lost now is gone forever — the agent
+        # cannot store it for a better price later, so the penalty must exceed r_price_timing.
+        curtailed_kwh = 0.0
         if grid_status == 1 and total_export_possible > 0.01:
             actually_exported = max(0.0, -actual_grid_ts)
-            curtailed = max(0.0, total_export_possible - actually_exported)
-            if curtailed > 0.01:
-                r_curtail = -curtailed * curr_price
+            curtailed_kwh = max(0.0, total_export_possible - actually_exported)
+            if curtailed_kwh > 0.01:
+                r_curtail = -curtailed_kwh * curr_price * 3.0
 
         # Price-timing bonus: reward selling above the day's average price, penalise buying above it.
         # Coefficient 1.0 (down from 2.0): less aggressive holding reduces curtailment in summer
@@ -329,9 +332,19 @@ class Environment(gym.Env):
             elif actual_grid_ts > 0: # buying from grid
                 r_price_timing = -price_dev * actual_grid_ts * 1.0        # penalty for buying high
 
+        # Solar-priority penalty: penalise supplementing battery charging from the grid while
+        # solar is simultaneously available. Only fires when grid_needed_for_batt > 0 (the agent
+        # chose a charge rate that solar surplus alone can't cover). Load-driven grid imports
+        # (unavoidable when load > solar + battery discharge) are excluded — the agent can't
+        # avoid those and penalising them creates unlearnable gradient noise.
+        # Bypassed when an outage is imminent and emergency pre-charging is mandatory.
+        if grid_status == 1 and grid_needed_for_batt > 0.01 and solar_gen_ts > 0.1 and not outage_imminent:
+            solar_fraction    = min(1.0, solar_gen_ts / (solar_gen_ts + grid_needed_for_batt))
+            r_solar_priority  = -grid_needed_for_batt * solar_fraction * curr_price * 2.0
+
         # Normalize by capacity so episodes with different hardware produce comparable gradient scales.
         # Without this, a 250 kWh episode dominates a 50 kWh one by 5× in the replay buffer.
-        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste + r_curtail + r_price_timing) / (self.max_batt_capacity / 100.0)
+        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste + r_curtail + r_price_timing + r_solar_priority) / (self.max_batt_capacity / 100.0)
 
         self.curr_step += 1
         terminated = self.curr_step >= self.episode_start + self.episode_len
@@ -358,9 +371,11 @@ class Environment(gym.Env):
             'reward_reserve':    r_reserve,
             'reward_preparation':r_preparation,
             'reward_soc_target': r_soc_target,
-            'reward_waste':        r_waste,
-            'reward_curtail':      r_curtail,
-            'reward_price_timing': r_price_timing,
+            'curtailed_kwh':         curtailed_kwh,
+            'reward_waste':          r_waste,
+            'reward_curtail':        r_curtail,
+            'reward_price_timing':   r_price_timing,
+            'reward_solar_priority': r_solar_priority,
         }
 
         return observation, reward, terminated, truncated, info
