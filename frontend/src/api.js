@@ -57,3 +57,17 @@ export const getHistoryDates = (config_name) => {
   const p = new URLSearchParams({ config_name });
   return fetch(`${BASE}/predictions/history/dates?${p}`, { headers: authHdr() }).then(handle);
 };
+
+export const saveConfig = ({ config_name, ...settings }) =>
+  fetch(`${BASE}/config/?config_name=${encodeURIComponent(config_name)}`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', ...authHdr() },
+    body:    JSON.stringify(settings),
+  }).then(handle);
+
+export const saveStrategy = (data) =>
+  fetch(`${BASE}/strategy/`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', ...authHdr() },
+    body:    JSON.stringify(data),
+  }).then(handle);

@@ -6,7 +6,7 @@ import pandas as pd
 
 class Environment(gym.Env):
 
-    PRICE_LOOKAHEAD = 32  # 8-hour forward price window fed to the network
+    PRICE_LOOKAHEAD = 96  # 24-hour forward price window — full next-day DAM curve
     PRICE_HISTORY   = 16  # 4-hour backward price window (context for arbitrage)
     LOAD_LOOKAHEAD  = 16  # 4-hour load forecast fed to the network
     GTI_LOOKAHEAD   = 16  # 4-hour solar irradiance forecast fed to the network
@@ -54,8 +54,8 @@ class Environment(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         n_features = df.shape[1]
-        # 17 normalized features + SoC + 8-hour price lookahead + 4-hour price history + load/GTI lookahead
-        obs_size = n_features + 1 + self.PRICE_LOOKAHEAD + self.PRICE_HISTORY + self.LOAD_LOOKAHEAD + self.GTI_LOOKAHEAD
+        # 17 normalized features + SoC + 24h price lookahead + 4h price history + load/GTI lookahead + tomorrow solar summary
+        obs_size = n_features + 1 + self.PRICE_LOOKAHEAD + self.PRICE_HISTORY + self.LOAD_LOOKAHEAD + self.GTI_LOOKAHEAD + 1
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
 
     def _calc_solar_generation_ts(self, gti_w_m2: float) -> float:
@@ -89,7 +89,7 @@ class Environment(gym.Env):
         row = self.df.iloc[idx]
         base = np.append(row.values, self.soc)
 
-        # Forward lookahead: 8-hour price, 4-hour load/GTI; zero-pad beyond dataset end.
+        # Forward lookahead: 24-hour price, 4-hour load/GTI; zero-pad beyond dataset end.
         price_fwd = np.zeros(self.PRICE_LOOKAHEAD, dtype=np.float32)
         load_vec  = np.zeros(self.LOAD_LOOKAHEAD,  dtype=np.float32)
         gti_vec   = np.zeros(self.GTI_LOOKAHEAD,   dtype=np.float32)
@@ -108,7 +108,12 @@ class Environment(gym.Env):
         h = self.df['DAM_Price'].iloc[hist_start:idx].values
         price_hist[self.PRICE_HISTORY - len(h):] = h
 
-        return np.concatenate([base, price_fwd, price_hist, load_vec, gti_vec]).astype(np.float32)
+        # Tomorrow solar summary: mean normalized GTI over the next 96 steps (one full day).
+        # Lets the agent plan SoC based on whether tomorrow will be sunny or cloudy.
+        next_gti = self.df['Global_tilted_irradiance_instant'].iloc[idx:idx + 96].values
+        tomorrow_solar = np.array([next_gti.mean() if len(next_gti) > 0 else 0.0], dtype=np.float32)
+
+        return np.concatenate([base, price_fwd, price_hist, load_vec, gti_vec, tomorrow_solar]).astype(np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -254,7 +259,7 @@ class Environment(gym.Env):
             money_earned_ts = -actual_grid_ts * buy_price         # cost of buying (negative)
 
         lcos_cost = self.lcos * actual_batt_energy_abs
-        r_lcos    = -2.5 * lcos_cost
+        r_lcos    = -3.0 * lcos_cost
 
         if unmet_load > 0:
             r_unmet = -unmet_load * buy_price * 5
@@ -340,11 +345,22 @@ class Environment(gym.Env):
         # Bypassed when an outage is imminent and emergency pre-charging is mandatory.
         if grid_status == 1 and grid_needed_for_batt > 0.01 and solar_gen_ts > 0.1 and not outage_imminent:
             solar_fraction    = min(1.0, solar_gen_ts / (solar_gen_ts + grid_needed_for_batt))
-            r_solar_priority  = -grid_needed_for_batt * solar_fraction * curr_price * 2.0
+            r_solar_priority  = -grid_needed_for_batt * solar_fraction * curr_price * 4.0
+
+        # End-of-day SoC carry reward: bonus for finishing the episode above DEFAULT_SOC_TARGET.
+        # Counteracts the agent's tendency to drain to min_reserve every night, which prevents
+        # it from capitalising on pre-dawn price peaks and next-day solar absorption room.
+        # Sparse (fires once per episode at step 95). Scale-invariant: the max_batt_capacity
+        # factor cancels with the /capacity normalization below, making it hardware-independent.
+        r_eod_soc = 0.0
+        step_in_ep = self.curr_step - self.episode_start
+        if step_in_ep == 95:
+            soc_carried = max(0.0, self.soc - self.DEFAULT_SOC_TARGET)
+            r_eod_soc = soc_carried * self.max_batt_capacity * buy_price * 0.15
 
         # Normalize by capacity so episodes with different hardware produce comparable gradient scales.
         # Without this, a 250 kWh episode dominates a 50 kWh one by 5× in the replay buffer.
-        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste + r_curtail + r_price_timing + r_solar_priority) / (self.max_batt_capacity / 100.0)
+        reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste + r_curtail + r_price_timing + r_solar_priority + r_eod_soc) / (self.max_batt_capacity / 100.0)
 
         self.curr_step += 1
         terminated = self.curr_step >= self.episode_start + self.episode_len
@@ -376,6 +392,7 @@ class Environment(gym.Env):
             'reward_curtail':        r_curtail,
             'reward_price_timing':   r_price_timing,
             'reward_solar_priority': r_solar_priority,
+            'reward_eod_soc':        r_eod_soc,
         }
 
         return observation, reward, terminated, truncated, info

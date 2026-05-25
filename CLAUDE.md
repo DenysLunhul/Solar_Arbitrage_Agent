@@ -115,14 +115,14 @@ ds_project_demo/
 ### Spaces
 
 ```python
-PRICE_LOOKAHEAD = 32  # steps of future DAM_Price appended to observation (8-hour horizon)
+PRICE_LOOKAHEAD = 96  # steps of future DAM_Price appended to observation (24-hour horizon — full next-day curve)
 PRICE_HISTORY   = 16  # steps of past  DAM_Price appended to observation (4-hour history)
 LOAD_LOOKAHEAD  = 16  # steps of future Load appended to observation (4-hour horizon)
 GTI_LOOKAHEAD   = 16  # steps of future GTI appended to observation (4-hour horizon)
 
 action_space      = Box(low=-1.0, high=1.0, shape=(2,), dtype=float32)
-observation_space = Box(low=-inf, high=inf, shape=(98,), dtype=float32)
-# 17 normalized feature cols + SoC + 32 price fwd + 16 price hist + 16 load + 16 GTI → shape (98,)
+observation_space = Box(low=-inf, high=inf, shape=(163,), dtype=float32)
+# 17 normalized feature cols + SoC + 96 price fwd + 16 price hist + 16 load + 16 GTI + 1 tomorrow solar → shape (163,)
 ```
 
 | Action dim | Meaning |
@@ -187,7 +187,7 @@ SoC is randomized uniformly on each reset: `self.soc = uniform(0.0, 1.0)`.
 
 ```
 r_market         = |grid_export| × (DAM_price/1000)  OR  grid_import × -(DAM_price/1000 + 3.0)
-r_lcos           = -(2.5 × lcos × |batt_energy_cycled|)
+r_lcos           = -(3.0 × lcos × |batt_energy_cycled|)
 r_unmet          = -(unmet_load × (DAM_price/1000 + 3.0) × 5)        # if unmet_load > 0
 r_mismatch       = 0.0                                                 # disabled (kept in info for compat)
 r_soc_soft       = -(50.0 × violation²)                               # outside [soc_min, 0.80]
@@ -197,8 +197,9 @@ r_preparation    = 20.0 × exp(-0.5 × hours_until_outage) × min(soc, target_so
 r_soc_target     = solar_chem_stored × buy_price                      # solar-sourced charging while soc < target_soc
 r_waste          = -(10.0 × lcos × wasted_kWh)                       # discharge exceeding demand + grid headroom
 r_curtail        = -(curtailed_kWh × curr_price × 3.0)               # solar surplus discarded, not stored or exported (grid up)
-r_solar_priority = -(grid_needed_for_batt × solar_fraction × curr_price × 2.0)  # grid charging while solar active (non-outage, load imports excluded)
+r_solar_priority = -(grid_needed_for_batt × solar_fraction × curr_price × 4.0)  # grid charging while solar active (non-outage, load imports excluded)
 r_price_timing   = ±price_dev × |grid_kwh| × 1.0                    # bonus sell-high / penalty buy-high
+r_eod_soc        = max(0, soc - DEFAULT_SOC_TARGET) × capacity × buy_price × 0.15  # fired at step 95 only
 
 reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalized by capacity
 ```
@@ -280,17 +281,17 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 | Parameter | Value | Note |
 |---|---|---|
 | Algorithm | SAC (MlpPolicy) | |
-| Total timesteps | 15 000 000 | reduced from 20M; model_9 peaked at 5.9M so 15M gives headroom |
-| Buffer size | 1 000 000 | |
+| Total timesteps | 20 000 000 | extended from 15M; model_10 peaked at 5.9M, more headroom needed |
+| Buffer size | 2 000 000 | doubled from 1M — covers ~10% of training experience at end |
 | Batch size | 512 | |
-| Learning rate | 1e-4 | lowered from 3e-4 to prevent overconfident early critic |
+| Learning rate | step decay | 1e-4 (0–12M) → 5e-5 (12–16M) → 2.5e-5 (16–20M); stabilises late training |
 | Target entropy | -1.0 | explicit; 'auto'=−2 allowed near-deterministic collapse |
 | Tau | 0.002 | lowered from 0.005 for more stable target network |
 | Learning starts | 50 000 | raised from 10k — gives ~16 full episodes before first update |
 | Clip reward | 100.0 | raised from 10.0 — 10.0 clipped r_unmet peaks (−587) to −10, losing signal |
 | Network arch | [512, 512] | |
 | n_envs | 32 (DummyVecEnv) | |
-| n_eval_episodes | 20 | |
+| n_eval_episodes | 50 | increased from 20 for a more stable eval signal |
 | Gamma | 0.99 | |
 | Entropy coef | auto | |
 | Eval frequency | every 100 000 env steps | |
@@ -553,7 +554,8 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 | 27 | Hardware sizing | ⚠️ Physical limit | December/January unmet load (Dec: 73 kWh/day, Jan: 41 kWh/day) is a fundamental hardware constraint: solar generates only 229 kWh/day in December but load is 781 kWh/day, and the 150 kWh battery cannot bridge a 552 kWh/day deficit during outages (6.68 h/day in December). Cannot be fixed with reward tuning; requires larger battery (400+ kWh) or accepting winter grid dependency. |
 | 28 | `environment/train.py` | ✅ Fixed | SAC entropy collapse: both model_7 (SAC_69) and model_8 (SAC_70) had alpha crash to ~0.0006 by step 600k. Root causes: `target_entropy='auto'` (=-2, too permissive), `lr=3e-4` (overconfident critic), `learning_starts=10k` (only 312 steps/env before first update), `tau=0.005`, `clip_reward=10.0` (clipped r_unmet peaks of −587 to −10). Fixed: `target_entropy=-1.0`, `lr=1e-4`, `learning_starts=50k`, `tau=0.002`, `clip_reward=100.0`. |
 | 29 | `environment/environment.py` | ✅ Fixed | r_lcos coefficient 2.5 → 4.0 overcorrected: model_9 hit 0.989 cycles/day but curtailed 28,475 kWh/year (vs ~10k for model_7) because the agent refused profitable cycles, wasting free solar. Economic savings dropped from 1.47M (model_7) to 483k UAH. Rolled back to 2.5 — the goal is economically optimal cycling, not minimizing cycle count at any cost. |
-| 30 | `environment/models/best/` | ⚠️ Pending | **Model_10 retrain required.** Fixes from #28 and #29 are applied; training must complete before API serves correct predictions. Archived models in `temp/`: `best_model_9_lcos4.zip` (model_9, r_lcos=4.0, economic_savings=483k UAH). Run: `cd environment && ../.venv/bin/python train.py` |
+| 30 | `environment/models/best/` | ✅ Done | Model_10 trained (SAC_72). Economic savings 459k UAH, cycles/day 1.12. |
+| 31 | `environment/environment.py`, `train.py` | ⚠️ Pending | **Model_11 retrain required.** Fixes applied: PRICE_LOOKAHEAD 32→96 (obs 98→163), r_lcos 2.5→3.0, r_solar_priority 2.0→4.0, r_eod_soc added (end-of-day carry bonus), tomorrow solar summary feature added. train.py: 20M steps, 2M buffer, n_eval_episodes=50, LR step decay. Run: `cd environment && ../.venv/bin/python train.py` |
 
 ---
 

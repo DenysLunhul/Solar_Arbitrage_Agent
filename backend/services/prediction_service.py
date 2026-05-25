@@ -92,23 +92,62 @@ def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: fl
     return _build_response(result, df_raw)
 
 
+def _compute_flows(solar: float, battery: float, grid: float, load: float, unmet: float) -> dict:
+    effective_load  = max(0.0, load - unmet)
+    batt_charge     = max(0.0, battery)
+    batt_discharge  = max(0.0, -battery)
+    grid_import     = max(0.0, grid)    # grid_kwh > 0 = buying from grid
+    grid_export     = max(0.0, -grid)   # grid_kwh < 0 = selling to grid
+
+    # Solar: load → battery → grid (surplus curtailed)
+    solar_to_load    = min(solar, effective_load)
+    solar_remaining  = solar - solar_to_load
+    solar_to_battery = min(solar_remaining, batt_charge)
+    solar_exportable = solar_remaining - solar_to_battery
+
+    # Battery discharge: remaining load → grid
+    remaining_load  = max(0.0, effective_load - solar_to_load)
+    battery_to_load = min(batt_discharge, remaining_load)
+    batt_for_grid   = batt_discharge - battery_to_load
+
+    # Allocate actual grid export between solar surplus and battery (solar first)
+    solar_to_grid   = min(solar_exportable, grid_export)
+    battery_to_grid = min(batt_for_grid, grid_export - solar_to_grid)
+
+    # Grid import: battery charging gap first, then remaining load
+    grid_to_battery = min(max(0.0, batt_charge - solar_to_battery), grid_import)
+    grid_to_load    = max(0.0, grid_import - grid_to_battery)
+
+    return {
+        "solar_to_load_kwh":    round(solar_to_load, 4),
+        "solar_to_battery_kwh": round(solar_to_battery, 4),
+        "solar_to_grid_kwh":    round(solar_to_grid, 4),
+        "battery_to_load_kwh":  round(battery_to_load, 4),
+        "battery_to_grid_kwh":  round(battery_to_grid, 4),
+        "grid_to_load_kwh":     round(grid_to_load, 4),
+        "grid_to_battery_kwh":  round(grid_to_battery, 4),
+    }
+
+
 def _build_response(result: dict, df_raw: pd.DataFrame) -> dict:
     steps = []
     for s in result["dispatch_plan"]:
         row = df_raw.iloc[s["step"]]
+        load_kwh = round(float(row["Load"]) / 4, 4)
         steps.append({
-            "timestamp":         str(row["timestamp"]),
-            "soc":               s["soc"],
-            "target_soc":        s["target_soc"],
-            "solar_kwh":         s["solar_gen_kwh"],
-            "load_kwh":          round(float(row["Load"]) / 4, 4),
-            "battery_kwh":       s["battery_kwh"],
-            "grid_kwh":          s["grid_kwh"],
-            "unmet_load_kwh":    s["unmet_load_kwh"],
-            "money_earned_ts":   s["money_earned_ts"],
-            "dam_price":         round(float(row["DAM_Price"]) / 1000, 4),
-            "grid_status":       int(row["Grid"]),
+            "timestamp":          str(row["timestamp"]),
+            "soc":                s["soc"],
+            "target_soc":         s["target_soc"],
+            "solar_kwh":          s["solar_gen_kwh"],
+            "load_kwh":           load_kwh,
+            "battery_kwh":        s["battery_kwh"],
+            "grid_kwh":           s["grid_kwh"],
+            "unmet_load_kwh":     s["unmet_load_kwh"],
+            "money_earned_ts":    s["money_earned_ts"],
+            "dam_price":          round(float(row["DAM_Price"]) / 1000, 4),
+            "grid_status":        int(row["Grid"]),
             "hours_until_outage": round(float(row["hours_until_outage"]), 2),
+            **_compute_flows(s["solar_gen_kwh"], s["battery_kwh"], s["grid_kwh"], load_kwh, s["unmet_load_kwh"]),
         })
 
     raw = result["summary"]
@@ -201,6 +240,7 @@ def get_history(
             "dam_price":          r.dam_price,
             "grid_status":        r.grid_status,
             "hours_until_outage": r.hours_until_outage,
+            **_compute_flows(r.solar_kwh or 0.0, r.battery_kwh or 0.0, r.grid_kwh or 0.0, r.load_kwh or 0.0, r.unmet_load_kwh or 0.0),
         }
         for r in rows
     ]

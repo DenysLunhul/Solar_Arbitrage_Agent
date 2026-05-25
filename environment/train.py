@@ -13,6 +13,17 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 from environment import Environment
 
 
+def lr_schedule(progress_remaining: float) -> float:
+    """Step decay: 1e-4 for the first 60%, 5e-5 for 60-80%, 2.5e-5 for the final 20%.
+    Stabilises the critic in late training where oscillations previously prevented improvement."""
+    if progress_remaining > 0.40:
+        return 1e-4
+    elif progress_remaining > 0.20:
+        return 5e-5
+    else:
+        return 2.5e-5
+
+
 CONFIG = {
     'dataset_path':    'dataset_normalized.csv',
     'dataset_raw_path': 'dataset_final.csv',
@@ -21,17 +32,17 @@ CONFIG = {
     'tensorboard_dir': 'logs/tensorboard/',
     'monitor_dir':     'logs/monitor/',
 
-    'total_timesteps': 15_000_000,
+    'total_timesteps': 20_000_000,
     'eval_freq':       100_000,
     'log_interval':    100_000,  # large value — suppress SB3 default episode logging
     'n_envs':          32,       # DummyVecEnv: no IPC overhead, env step ~0.11 ms each
 
     'sac_params': {
         'device':          'cuda',
-        'buffer_size':     1_000_000,
+        'buffer_size':     2_000_000,
         'learning_starts': 50_000,   # 50k / 32 envs ≈ 1562 steps/env (~16 full episodes) before first update
         'batch_size':      512,
-        'learning_rate':   1e-4,     # 3e-4 caused overconfident early critic, contributing to entropy collapse
+        'learning_rate':   lr_schedule,  # step decay 1e-4→5e-5→2.5e-5; stabilises critic in late training
         'gamma':           0.99,
         'tau':             0.002,    # slower target-net update → more stable critic
         'ent_coef':        'auto',
@@ -242,7 +253,7 @@ def make_callbacks(train_env, eval_env):
         best_model_save_path=os.path.join('models', 'best'),
         log_path=os.path.join('logs', 'eval'),
         eval_freq=freq,
-        n_eval_episodes=20,
+        n_eval_episodes=50,
         deterministic=True,
         verbose=1,
     )

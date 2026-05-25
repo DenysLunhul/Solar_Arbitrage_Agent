@@ -101,18 +101,25 @@ class DefaultStrategyResponse(BaseModel):
 
 
 class DispatchStep(BaseModel):
-    timestamp:          str
-    soc:                float
-    target_soc:         float
-    solar_kwh:          float
-    load_kwh:           float
-    battery_kwh:        float
-    grid_kwh:           float
-    unmet_load_kwh:     float
-    money_earned_ts:    float
-    dam_price:          float
-    grid_status:        int
-    hours_until_outage: float
+    timestamp:            str
+    soc:                  float
+    target_soc:           float
+    solar_kwh:            float
+    load_kwh:             float
+    battery_kwh:          float
+    grid_kwh:             float
+    unmet_load_kwh:       float
+    money_earned_ts:      float
+    dam_price:            float
+    grid_status:          int
+    hours_until_outage:   float
+    solar_to_load_kwh:    float
+    solar_to_battery_kwh: float
+    solar_to_grid_kwh:    float
+    battery_to_load_kwh:  float
+    battery_to_grid_kwh:  float
+    grid_to_load_kwh:     float
+    grid_to_battery_kwh:  float
 
 
 class DispatchSummary(BaseModel):

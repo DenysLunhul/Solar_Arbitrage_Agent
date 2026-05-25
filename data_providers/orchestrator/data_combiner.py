@@ -3,7 +3,7 @@ from datetime import datetime
 
 from data_providers.components.grid.synthetic_grid import fetch_grid
 from data_providers.components.load.synthetic_load import fetch_load
-from data_providers.components.market_manager.IDM_DAM_features import fetch_DAM
+from data_providers.components.market_manager.DAM_features import fetch_DAM
 from data_providers.components.weather.weather import fetch_weather
 from data_providers.components.time.time_features import fetch_time
 
