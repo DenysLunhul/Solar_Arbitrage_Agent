@@ -495,16 +495,21 @@ aws cloudfront create-invalidation --distribution-id <ID> --paths "/*"
 ```
 
 ### `src/api.js`
-All fetch calls with JWT handling. Token stored in `localStorage` under key `ems_token`. On 401, clears token and reloads page to show login screen. Reads `VITE_API_URL` env var at build time.
+All fetch calls with JWT handling. Token stored in `localStorage` under key `ems_token`. On 401, clears token and reloads page to show login screen. Reads `VITE_API_URL` env var at build time. Exports: `login`, `register`, `listConfigs`, `listStrategies`, `saveConfig`, `saveStrategy`, `getPredictions`, `getDefaultPredictions`, `getHistory`, `getHistoryDates`. Note: `saveConfig` sends `config_name` as a query param and the rest as JSON body (matches backend signature).
 
 ### `src/App.jsx` — screens & components
 
 | Component | Description |
 |---|---|
 | `Login` | Login + Register tabs. POST `/auth/login` (form-urlencoded) → stores token |
-| `Sidebar` | Mode tabs (SAC / Default / Історія), config/strategy dropdowns (from API), initial SoC input, run button, CSV upload, logout |
-| `Kpis` | 4 KPI cards from `summary` object (earned, sold/bought, solar, unmet) |
+| `Sidebar` | 4 mode tabs (SAC / Default / Порівняти / Історія), config/strategy dropdowns, initial SoC input, run button, CSV upload, Settings button, logout |
+| `SettingsModal` | Modal with 2 tabs: create/update system config (battery, inverter, solar, grid) and create/update strategy. Calls `POST /config/` and `POST /strategy/`. Refreshes dropdowns on save. |
+| `Kpis` | 5 KPI cards: cash flow, economic savings vs grid-only, sold/bought kWh, solar generation, unmet load |
 | `Charts` | SoC area chart (full width), Solar area chart, Grid bar chart (green=sell / red=buy) |
+| `FlowCharts` | Stacked area: "where solar goes" (→load / →battery / →grid / curtailed) + "load coverage" (solar / battery / grid / unmet) |
+| `BatteryPnlCharts` | Battery charge/discharge bar chart + cumulative P&L area chart |
+| `CompareKpis` | Side-by-side SAC vs Default metrics table with delta arrows (grouped: Фінанси / Енергія / SoC) |
+| `CompareCharts` | 6 charts: SoC overlay, P&L overlay, SAC grid exchange, Default grid exchange, summary horizontal bar |
 | `Table` | Paginated dispatch table (20 rows/page) — timestamp, SoC bar, battery direction, grid badge, solar, load, DAM price, P&L |
 
 ### Sidebar modes
@@ -512,6 +517,7 @@ All fetch calls with JWT handling. Token stored in `localStorage` under key `ems
 |---|---|---|
 | SAC | `GET /predictions/` | Yes |
 | Default | `GET /predictions/default` | No |
+| Порівняти | `GET /predictions/` + `GET /predictions/default` in parallel | SAC only |
 | Історія | `GET /predictions/history` | Read-only |
 
 Config and strategy dropdowns auto-populate from `/config/list` and `/strategy/list` on login; refresh button re-fetches. If list is empty, falls back to a text input for manual entry. History dates auto-load from `/predictions/history/dates` when switching to history mode.
@@ -525,7 +531,7 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 
 | # | Location | Status | Issue |
 |---|---|---|---|
-| 1 | `IDM_DAM_features.py` | ❌ Open | IDM fetching not implemented; only DAM active |
+| 1 | `IDM_DAM_features.py` | ✅ Fixed | Renamed to `DAM_features.py` — IDM was never implemented; all imports updated in `data_combiner.py` and `run_live.py` |
 | 2 | `requirements.txt` | ✅ Fixed | All deps present: `scikit-learn`, `psycopg2-binary`, `openpyxl`, `uvicorn` |
 | 3 | Real SoC input | ⚠️ Manual | `initial_soc` auto-persisted via DB (API) but no live BMS/inverter integration |
 | 4 | `GET /predictions/history` | ✅ Fixed | Endpoints added: `/predictions/history` (by date) + `/predictions/history/dates` (list) |
@@ -534,7 +540,7 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 | 7 | `inference.py __main__` | ✅ Fixed | Project root added to `sys.path` so `data_providers` import works when running directly |
 | 8 | `inference.py __main__` | ✅ Fixed | NaN guard added — aborts with clear error if DAM columns are all NaN instead of crashing PyTorch |
 | 9 | `combined.csv` | ⚠️ External | DAM_Price/Vol columns are NaN when OREE fetch fails — inference will abort cleanly but needs live DAM data to run |
-| 10 | `AgentPredictions` energy flow cols | ⚠️ Schema only | 6 columns (`solar_to_load_kwh`, `solar_to_battery_kwh`, `solar_to_grid_kwh`, `battery_to_load_kwh`, `grid_to_load_kwh`, `grid_to_battery_kwh`) in DB model but never populated by `_build_rows()` in `prediction_service.py` — always NULL |
+| 10 | `AgentPredictions` energy flow cols | ✅ Fixed | 7 flow fields now computed on-the-fly by `_compute_flows()` in `prediction_service.py` from existing dispatch data — no DB schema changes needed. All three prediction endpoints (SAC, default, history) return these fields. |
 | 11 | `inference.py` | ✅ Fixed | `reward_curtail` now captured from `info` dict and included in dispatch plan; `_build_rows()` stores it |
 | 12 | `backend/models/site.py` | ✅ Fixed | `reward_curtail` column added to `AgentPredictions` — **existing DBs need `ALTER TABLE predictions ADD COLUMN reward_curtail FLOAT;`** |
 | 13 | `environment/environment.py` | ✅ Fixed | Discharge efficiency: DC request converted to chemical kWh (`chem_needed = energy_to_draw / η`) before clamping to `max_drawable`; SoC drain and DC output now physically consistent. Requires retraining. |
@@ -556,6 +562,7 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 | 29 | `environment/environment.py` | ✅ Fixed | r_lcos coefficient 2.5 → 4.0 overcorrected: model_9 hit 0.989 cycles/day but curtailed 28,475 kWh/year (vs ~10k for model_7) because the agent refused profitable cycles, wasting free solar. Economic savings dropped from 1.47M (model_7) to 483k UAH. Rolled back to 2.5 — the goal is economically optimal cycling, not minimizing cycle count at any cost. |
 | 30 | `environment/models/best/` | ✅ Done | Model_10 trained (SAC_72). Economic savings 459k UAH, cycles/day 1.12. |
 | 31 | `environment/environment.py`, `train.py` | ⚠️ Pending | **Model_11 retrain required.** Fixes applied: PRICE_LOOKAHEAD 32→96 (obs 98→163), r_lcos 2.5→3.0, r_solar_priority 2.0→4.0, r_eod_soc added (end-of-day carry bonus), tomorrow solar summary feature added. train.py: 20M steps, 2M buffer, n_eval_episodes=50, LR step decay. Run: `cd environment && ../.venv/bin/python train.py` |
+| 32 | `frontend/src/App.jsx` | ✅ Done | Full dashboard implemented: 4 tabs (SAC/Default/Порівняти/Історія), 5 KPI cards, flow charts, battery P&L charts, compare mode (SAC vs Default side-by-side), settings modal for creating configs and strategies from the UI. |
 
 ---
 
