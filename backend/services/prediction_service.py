@@ -1,12 +1,10 @@
 import pickle
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-
 import pandas as pd
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from stable_baselines3 import SAC
-
 from backend.models.site import AgentPredictions
 from backend.repositories import config_repo, prediction_repo, strategy_repo
 from backend.schemas.schemas import SiteConfig
@@ -19,9 +17,7 @@ _BASE_DIR    = Path(__file__).resolve().parent.parent.parent
 MODEL_PATH   = str(_BASE_DIR / "environment" / "models" / "best" / "best_model")
 SCALERS_PATH = str(_BASE_DIR / "environment" / "models" / "scalers.pkl")
 OBS_RMS_PATH = str(_BASE_DIR / "environment" / "models" / "obs_rms.pkl")
-
 UA_TZ = timezone(timedelta(hours=2))
-
 _cached_model: tuple | None = None
 
 
@@ -54,11 +50,9 @@ def _get_model() -> tuple:
 
 def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: float | None) -> dict:
     _check_time_gate()
-
     raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
     if raw_config is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Config not found")
-
     if initial_soc is None:
         persisted_soc = prediction_repo.get_last_soc(db, raw_config.id)
         if persisted_soc is not None:
@@ -67,13 +61,10 @@ def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: fl
             initial_soc = max(persisted_soc, min_reserve)
         else:
             initial_soc = 0.5
-
     df_raw = combine(raw_config.id)
     if df_raw is None or df_raw.isnull().values.any():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Dataset has null values")
-
     model, scalers, obs_rms = _get_model()
-
     result = run_inference(
         df_raw=df_raw,
         system_config=SiteConfig(**raw_config.settings).to_env_dict(),
@@ -82,13 +73,11 @@ def get_predictions(db: Session, config_name: str, user_id: int, initial_soc: fl
         initial_soc=initial_soc,
         obs_rms=obs_rms,
     )
-
     tomorrow = (datetime.now(UA_TZ) + timedelta(days=1)).date()
     prediction_repo.delete_for_date(db, raw_config.id, tomorrow)
     prediction_repo.bulk_create(
         db, _build_rows(result["dispatch_plan"], df_raw, user_id, raw_config.id, tomorrow)
     )
-
     return _build_response(result, df_raw)
 
 
@@ -96,28 +85,19 @@ def _compute_flows(solar: float, battery: float, grid: float, load: float, unmet
     effective_load  = max(0.0, load - unmet)
     batt_charge     = max(0.0, battery)
     batt_discharge  = max(0.0, -battery)
-    grid_import     = max(0.0, grid)    # grid_kwh > 0 = buying from grid
-    grid_export     = max(0.0, -grid)   # grid_kwh < 0 = selling to grid
-
-    # Solar: load → battery → grid (surplus curtailed)
+    grid_import     = max(0.0, grid)
+    grid_export     = max(0.0, -grid)
     solar_to_load    = min(solar, effective_load)
     solar_remaining  = solar - solar_to_load
     solar_to_battery = min(solar_remaining, batt_charge)
     solar_exportable = solar_remaining - solar_to_battery
-
-    # Battery discharge: remaining load → grid
     remaining_load  = max(0.0, effective_load - solar_to_load)
     battery_to_load = min(batt_discharge, remaining_load)
     batt_for_grid   = batt_discharge - battery_to_load
-
-    # Allocate actual grid export between solar surplus and battery (solar first)
     solar_to_grid   = min(solar_exportable, grid_export)
     battery_to_grid = min(batt_for_grid, grid_export - solar_to_grid)
-
-    # Grid import: battery charging gap first, then remaining load
     grid_to_battery = min(max(0.0, batt_charge - solar_to_battery), grid_import)
     grid_to_load    = max(0.0, grid_import - grid_to_battery)
-
     return {
         "solar_to_load_kwh":    round(solar_to_load, 4),
         "solar_to_battery_kwh": round(solar_to_battery, 4),
@@ -149,7 +129,6 @@ def _build_response(result: dict, df_raw: pd.DataFrame) -> dict:
             "hours_until_outage": round(float(row["hours_until_outage"]), 2),
             **_compute_flows(s["solar_gen_kwh"], s["battery_kwh"], s["grid_kwh"], load_kwh, s["unmet_load_kwh"]),
         })
-
     raw = result["summary"]
     summary = {
         "total_money_earned": raw["total_money_earned"],
@@ -162,7 +141,6 @@ def _build_response(result: dict, df_raw: pd.DataFrame) -> dict:
         "final_soc":          raw["final_soc"],
         "steps":              raw["steps"],
     }
-
     return {
         "summary": summary,
         "dispatch_plan": steps,
@@ -171,15 +149,12 @@ def _build_response(result: dict, df_raw: pd.DataFrame) -> dict:
 
 def get_default_predictions(db, config_name: str, user_id: int, strategy_name: str, initial_soc: float | None) -> dict:
     _check_time_gate()
-
     raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
     if raw_config is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Config not found")
-
     strategy_row = strategy_repo.get(db, user_id, strategy_name)
     if strategy_row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-
     if initial_soc is None:
         persisted_soc = prediction_repo.get_last_soc(db, raw_config.id)
         if persisted_soc is not None:
@@ -188,16 +163,12 @@ def get_default_predictions(db, config_name: str, user_id: int, strategy_name: s
             initial_soc = max(persisted_soc, min_reserve)
         else:
             initial_soc = 0.5
-
     df_raw = combine(raw_config.id)
     if df_raw is None or df_raw.isnull().values.any():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Dataset has null values")
-
     with open(SCALERS_PATH, 'rb') as f:
         scalers = pickle.load(f)
-
     df_norm = pd.DataFrame([normalize_row(df_raw.iloc[i], scalers) for i in range(len(df_raw))])
-
     system_config = SiteConfig(**raw_config.settings).to_env_dict()
     result = generate_dispatch_plan(
         df_raw=df_raw,
@@ -206,7 +177,6 @@ def get_default_predictions(db, config_name: str, user_id: int, strategy_name: s
         initial_soc=initial_soc,
         strategy=strategy_row.settings,
     )
-
     return _build_response(result, df_raw)
 
 
@@ -216,16 +186,13 @@ def get_history(
     raw_config = config_repo.get_by_name_and_user(db, config_name, user_id)
     if raw_config is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Config not found")
-
     if target_date is None:
         target_date = prediction_repo.get_latest_date(db, raw_config.id)
         if target_date is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No predictions stored for this config")
-
     rows = prediction_repo.get_by_config_and_date(db, raw_config.id, target_date)
     if not rows:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No predictions for {target_date}")
-
     steps = [
         {
             "timestamp":          str(r.timestamp),
@@ -244,7 +211,6 @@ def get_history(
         }
         for r in rows
     ]
-
     summary = {
         "total_money_earned": round(sum(r.money_earned_ts or 0 for r in rows), 2),
         "bought_kwh":         round(sum(r.grid_kwh for r in rows if (r.grid_kwh or 0) > 0), 3),
@@ -256,7 +222,6 @@ def get_history(
         "final_soc":          rows[-1].soc,
         "steps":              len(rows),
     }
-
     return {"summary": summary, "dispatch_plan": steps}
 
 
@@ -307,6 +272,9 @@ def _build_rows(
             reward_soc_target=step_data["reward_soc_target"],
             reward_waste=step_data["reward_waste"],
             reward_curtail=step_data["reward_curtail"],
+            reward_price_timing=step_data["reward_price_timing"],
+            reward_solar_priority=step_data["reward_solar_priority"],
+            reward_eod_soc=step_data["reward_eod_soc"],
             reward_total=step_data["reward"],
         ))
     return rows

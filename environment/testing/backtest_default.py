@@ -13,9 +13,9 @@ import argparse
 import pandas as pd
 from pathlib import Path
 
-_DIR = Path(__file__).resolve().parent.parent   # environment/
-sys.path.insert(0, str(_DIR.parent))            # project root
-sys.path.insert(0, str(_DIR))                   # environment/ — default_strategy lives here
+_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_DIR.parent))
+sys.path.insert(0, str(_DIR))
 os.chdir(_DIR)
 
 from default_strategy import generate_dispatch_plan, DEFAULT_STRATEGY
@@ -42,7 +42,6 @@ EVAL_SYSTEM_CONFIG = {
 }
 
 RESULTS_DIR = Path(__file__).resolve().parent / 'results'
-
 
 def run(
     dataset_path:     str,
@@ -102,7 +101,6 @@ def run(
     summary_df = summary_df[[c for c in sum_cols if c in summary_df.columns]]
 
     return dispatch_df, summary_df
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

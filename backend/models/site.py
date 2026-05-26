@@ -1,6 +1,5 @@
 from sqlalchemy import Column, Integer, DateTime, String, ForeignKey, Float, Date
 from sqlalchemy.dialects.postgresql import JSONB
-
 from backend.core.database import Base
 
 
@@ -38,14 +37,12 @@ class History(Base):
 
 class AgentPredictions(Base):
     __tablename__ = "predictions"
-
     id        = Column(Integer, primary_key=True, index=True)
     user_id   = Column(Integer, ForeignKey("users.id"), index=True)
     config_id = Column(Integer, ForeignKey("system_configs.id"), index=True)
     date      = Column(Date, index=True)
     step      = Column(Integer)
     timestamp = Column(DateTime, index=True)
-
     battery_action = Column(Float)
     grid_action    = Column(Float)
 
@@ -66,16 +63,15 @@ class AgentPredictions(Base):
     soc        = Column(Float)
     target_soc = Column(Float)
     lcos_cost  = Column(Float)
-
-    dam_price = Column(Float)
+    dam_price  = Column(Float)
 
     grid_status          = Column(Integer)
     hours_until_outage   = Column(Float)
     outage_remaining_h   = Column(Float)
     next_outage_duration = Column(Float)
 
-    mismatch         = Column(Float)
-    money_earned_ts  = Column(Float)
+    mismatch        = Column(Float)
+    money_earned_ts = Column(Float)
 
     reward_market      = Column(Float)
     reward_lcos        = Column(Float)
@@ -85,8 +81,9 @@ class AgentPredictions(Base):
     reward_reserve     = Column(Float)
     reward_preparation = Column(Float)
     reward_soc_target  = Column(Float)
-    reward_waste       = Column(Float)
-    reward_curtail     = Column(Float)
-    reward_total       = Column(Float)
-
-
+    reward_waste          = Column(Float)
+    reward_curtail        = Column(Float)
+    reward_price_timing   = Column(Float)
+    reward_solar_priority = Column(Float)
+    reward_eod_soc        = Column(Float)
+    reward_total          = Column(Float)

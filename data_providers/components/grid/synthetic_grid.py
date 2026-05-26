@@ -8,24 +8,20 @@ def fetch_grid(today: date, seed: int = None) -> pd.DataFrame:
         1: 3.50, 2: 3.00, 3: 1.50, 4: 0.50, 5: 0.20, 6: 0.10,
         7: 0.21, 8: 0.25, 9: 0.40, 10: 2.07, 11: 3.12, 12: 6.68,
     }
-
     BLOCK_DURATION_WEIGHTS = {
         4: 0.35, 8: 0.30, 12: 0.20, 16: 0.10, 24: 0.03, 40: 0.02,
     }
-
-    TIMESTEPS_PER_DAY = 96 
+    TIMESTEPS_PER_DAY = 96
     MAX_HOURS_UNTIL_OUTAGE = 24.0
 
     input_dt = today
     target_dt = input_dt + timedelta(days=1)
-
     t_month = target_dt.month
     t_day = target_dt.day
     t_dow = target_dt.isoweekday()
 
     if seed is not None:
         np.random.seed(seed)
-
 
     target_h = TARGET_HOURS_PER_DAY.get(t_month, 0.0)
     target_timesteps = int(round(target_h * 4))
@@ -35,7 +31,6 @@ def fetch_grid(today: date, seed: int = None) -> pd.DataFrame:
         block_sizes = list(BLOCK_DURATION_WEIGHTS.keys())
         block_probs = np.array(list(BLOCK_DURATION_WEIGHTS.values()))
         block_probs /= block_probs.sum()
-
         filled = 0
         attempts = 0
         while filled < target_timesteps and attempts < 1000:

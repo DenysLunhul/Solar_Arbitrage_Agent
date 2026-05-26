@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 import argparse
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
@@ -11,14 +9,10 @@ def expand_to_15_minutes(df: pd.DataFrame, hour_column: str = "Hour") -> pd.Data
     """Duplicate each hourly row 4x and assign minute marks 00, 15, 30, 45."""
     if hour_column not in df.columns:
         raise ValueError(f"Column '{hour_column}' was not found in the input dataset")
-
     expanded = df.loc[df.index.repeat(4)].copy().reset_index(drop=True)
     expanded["Minute"] = np.tile([0, 15, 30, 45], len(df))
-
-    # Keep a readable time string even if source data uses non-standard hour values (e.g., 25).
     hour_as_int = pd.to_numeric(expanded[hour_column], errors="coerce").fillna(0).astype(int)
     expanded["Time"] = hour_as_int.map(lambda h: f"{h:02d}") + ":" + expanded["Minute"].map(lambda m: f"{m:02d}")
-
     return expanded
 
 
@@ -51,7 +45,6 @@ def main() -> None:
     source = pd.read_csv(args.input)
     expanded = expand_to_15_minutes(source, hour_column=args.hour_column)
     expanded.to_csv("expanded.csv", index=False)
-
     print(f"Input rows: {len(source)}")
     print(f"Output rows: {len(expanded)}")
     print(f"Saved: {args.output}")
@@ -59,4 +52,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

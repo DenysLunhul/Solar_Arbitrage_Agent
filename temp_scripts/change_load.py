@@ -31,29 +31,27 @@ os.chdir(Path(__file__).resolve().parent)
 DATA_PATH    = Path('../environment/dataset_final.csv')
 ALSO_UPDATE  = Path('../datasets/dataset_v10/dataset_final.csv')
 
-NIGHT_BASE    = 20.0   # kW  (00:00-07:45 and 19:00-23:45)
-DAY_BASE      = 60.0   # kW  (08:00-18:45)
-WEEKEND_SCALE = 0.40   # factory mostly idle on weekends
+NIGHT_BASE    = 20.0
+DAY_BASE      = 60.0
+WEEKEND_SCALE = 0.40
 DAY_START     = 8
 DAY_END       = 18
 SEED          = 42
-
 
 def generate_load(df: pd.DataFrame) -> pd.Series:
     rng = np.random.default_rng(SEED)
 
     ts   = pd.to_datetime(df['timestamp'])
     hour = ts.dt.hour.values
-    dow  = ts.dt.dayofweek.values   # 0=Mon … 6=Sun
+    dow  = ts.dt.dayofweek.values
 
-    # Per-day multiplier so each day looks slightly different
     dates        = ts.dt.date.values
     unique_dates = list(dict.fromkeys(dates))
     day_mult_map = {d: rng.uniform(0.92, 1.08) for d in unique_dates}
     day_mult     = np.array([day_mult_map[d] for d in dates])
 
     is_business = (hour >= DAY_START) & (hour <= DAY_END)
-    is_weekend  = dow >= 5   # Sat=5, Sun=6
+    is_weekend  = dow >= 5
 
     base = np.where(is_business, DAY_BASE, NIGHT_BASE)
     base = np.where(is_weekend,  base * WEEKEND_SCALE, base)
@@ -67,7 +65,6 @@ def generate_load(df: pd.DataFrame) -> pd.Series:
 
     load = (base * day_mult * step_noise + spikes).round(2)
     return pd.Series(load, index=df.index, name='Load')
-
 
 if __name__ == '__main__':
     print(f"Reading {DATA_PATH} ...")

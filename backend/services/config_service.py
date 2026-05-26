@@ -1,6 +1,5 @@
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
-
 from backend.models.site import SystemConfig
 from backend.repositories import config_repo
 from backend.schemas.schemas import SiteConfig

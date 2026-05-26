@@ -36,21 +36,17 @@ DEFAULT_SYSTEM_CONFIG = {
     },
 }
 
-
 DEFAULT_STRATEGY = {
-    'target_soc':             0.70,   # charge to this SoC before selling surplus
-    'max_soc':                0.95,   # top-up ceiling during abundant solar
-    'min_solar_threshold':    10.0,   # W/m² — below this = no meaningful generation
-    'high_solar_threshold':   400.0,  # W/m² — above this = abundant solar
-    # "charge_first": fill battery before exporting surplus
-    # "sell_first":   export solar immediately, charge only when battery is below target
+    'target_soc':             0.70,
+    'max_soc':                0.95,
+    'min_solar_threshold':    10.0,
+    'high_solar_threshold':   400.0,
     'solar_surplus_priority': 'charge_first',
-    'night_discharge':        True,   # discharge battery at night to cover load
-    'night_sell':             False,  # also export battery energy to grid at night
-    'allow_grid_charging':    False,  # charge battery from grid when SoC < target
-    'outage_reserve':         0.0,    # keep this SoC even during outages (0 = discharge fully)
+    'night_discharge':        True,
+    'night_sell':             False,
+    'allow_grid_charging':    False,
+    'outage_reserve':         0.0,
 }
-
 
 def inverter_action(row: pd.Series, soc: float, strategy: dict | None = None) -> np.ndarray:
     """Rule-based hybrid inverter dispatch driven by a user-configurable strategy dict."""
@@ -70,40 +66,33 @@ def inverter_action(row: pd.Series, soc: float, strategy: dict | None = None) ->
     grid_charging   = strategy.get('allow_grid_charging',     DEFAULT_STRATEGY['allow_grid_charging'])
     outage_reserve  = strategy.get('outage_reserve',          DEFAULT_STRATEGY['outage_reserve'])
 
-    # ── Outage: grid is down ──────────────────────────────────────────────────
     if grid_status == 0:
         if soc > outage_reserve:
-            return np.array([-1.0, 0.0], dtype=np.float32)   # discharge to serve load
-        return np.array([0.0, 0.0], dtype=np.float32)          # reserve floor reached, idle
+            return np.array([-1.0, 0.0], dtype=np.float32)
+        return np.array([0.0, 0.0], dtype=np.float32)
 
-    # ── Grid is up ───────────────────────────────────────────────────────────
     has_solar      = gti > min_solar
     abundant_solar = gti > high_solar
 
     if has_solar:
         if soc < target_soc:
-            # Always fill battery to target before anything else
             return np.array([1.0, 0.0], dtype=np.float32)
 
         if sol_priority == 'charge_first':
-            # Keep charging toward max_soc whenever solar is present, export the rest
             if soc < max_soc:
-                return np.array([1.0, 1.0], dtype=np.float32)  # charge + export surplus
-            return np.array([0.0, 1.0], dtype=np.float32)       # full, export only
+                return np.array([1.0, 1.0], dtype=np.float32)
+            return np.array([0.0, 1.0], dtype=np.float32)
 
-        else:  # sell_first
-            # Battery is at target — stop charging, export everything
+        else:
             return np.array([0.0, 1.0], dtype=np.float32)
 
     else:
-        # Night / low irradiance
         if night_discharge:
             grid_act = 1.0 if night_sell else 0.0
             return np.array([-1.0, grid_act], dtype=np.float32)
         if grid_charging and soc < target_soc:
-            return np.array([1.0, -1.0], dtype=np.float32)     # buy from grid to charge
-        return np.array([0.0, 0.0], dtype=np.float32)           # idle
-
+            return np.array([1.0, -1.0], dtype=np.float32)
+        return np.array([0.0, 0.0], dtype=np.float32)
 
 def generate_dispatch_plan(
     df_raw:      pd.DataFrame,
@@ -181,7 +170,6 @@ def generate_dispatch_plan(
         print(f"Saved {len(dispatch_plan)} steps → {output_file}")
 
     return {'dispatch_plan': dispatch_plan, 'summary': summary}
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

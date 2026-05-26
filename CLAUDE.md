@@ -44,7 +44,7 @@ ds_project_demo/
 │   │   ├── data_combiner.py               # Main entry: assembles "tomorrow" DataFrame from all providers
 │   │   └── combined.csv                   # Last generated live dataset (96 rows × 25 cols)
 │   └── components/
-│       ├── market_manager/IDM_DAM_features.py   # Fetches DAM prices from OREE (oree.com.ua)
+│       ├── market_manager/DAM_features.py        # Fetches DAM prices from OREE (oree.com.ua)
 │       ├── weather/weather.py             # Open-Meteo forecast (GTI, temp, radiation) — plain requests.Session
 │       ├── grid/synthetic_grid.py         # Synthetic outage schedule generator
 │       ├── load/synthetic_load.py         # Synthetic consumption profile
@@ -84,6 +84,7 @@ ds_project_demo/
 │       ├── main.jsx                       # React root mount
 │       ├── api.js                         # All API calls + JWT token management
 │       └── App.jsx                        # Full dashboard (login, charts, table, history)
+├── run_live.py                            # CLI: fetch tomorrow's data + run SAC inference (standalone)
 └── temp/                                  # One-off data-cleaning utility scripts
 ```
 
@@ -206,7 +207,7 @@ reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalize
 
 **Reward normalization**: dividing by `capacity / 100` keeps reward magnitude consistent across the domain-randomized hardware range (50–250 kWh), preventing large-battery configs from dominating the replay buffer.
 
-**r_lcos coefficient = 2.5**: raised from 1.4 after backtest showed 1.33 cycles/day (target ≤ 1.0) and 166k UAH LCOS/year. Each kWh cycled through a 150 kWh battery costs `2.5 × 1.15 / 1.5 = 1.92` in normalized reward — comparable to the r_market benefit from arbitrage, making unnecessary cycling unprofitable.
+**r_lcos coefficient = 3.0**: raised to 3.0 (from 2.5) in issue #31. Each kWh cycled through a 150 kWh battery costs `3.0 × 1.15 / 1.5 = 2.30` in normalized reward — stronger deterrent against unnecessary cycling while still allowing profitable arbitrage.
 
 **r_soc_soft below-target coefficient = 100.0**: raised from 25 to give a daily gap penalty of `-64` (normalized, 150 kWh battery, 10% below target over 96 steps) vs a single grid-charge step cost of `-90` — a margin of ~70% that SAC can reliably learn. At 25, the daily penalty was only `-16`, too weak to overcome charging cost.
 
@@ -220,7 +221,7 @@ reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalize
 
 **r_curtail multiplier = 3.0×**: raised from 1.0× because the model was discarding ~10k kWh/year of solar surplus. Solar lost at the current step cannot be recovered at a better price later; the 3× multiplier ensures curtailment always costs more in reward than any `r_price_timing` gain from holding.
 
-**r_solar_priority**: penalizes grid-sourced battery charging while solar is simultaneously active (> 0.1 kWh/step). Only fires when `grid_needed_for_batt > 0.01` — load-driven imports are excluded. Coefficient 2.0 × solar_fraction × curr_price × grid_needed_for_batt. Suppressed when outage is imminent (`hours_until_outage ≤ 3` and `soc < target_soc`). Backtest found 46.6% of all grid buying (69k kWh/year) happened during daylight, buying expensive grid power (8 UAH/kWh) while free solar was available.
+**r_solar_priority**: penalizes grid-sourced battery charging while solar is simultaneously active (> 0.1 kWh/step). Only fires when `grid_needed_for_batt > 0.01` — load-driven imports are excluded. Coefficient 4.0 × solar_fraction × curr_price × grid_needed_for_batt (raised from 2.0 in issue #31). Suppressed when outage is imminent (`hours_until_outage ≤ 3` and `soc < target_soc`). Backtest found 46.6% of all grid buying (69k kWh/year) happened during daylight, buying expensive grid power (8 UAH/kWh) while free solar was available.
 
 ### `info` dict (returned by `step()`)
 
@@ -561,8 +562,11 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 | 28 | `environment/train.py` | ✅ Fixed | SAC entropy collapse: both model_7 (SAC_69) and model_8 (SAC_70) had alpha crash to ~0.0006 by step 600k. Root causes: `target_entropy='auto'` (=-2, too permissive), `lr=3e-4` (overconfident critic), `learning_starts=10k` (only 312 steps/env before first update), `tau=0.005`, `clip_reward=10.0` (clipped r_unmet peaks of −587 to −10). Fixed: `target_entropy=-1.0`, `lr=1e-4`, `learning_starts=50k`, `tau=0.002`, `clip_reward=100.0`. |
 | 29 | `environment/environment.py` | ✅ Fixed | r_lcos coefficient 2.5 → 4.0 overcorrected: model_9 hit 0.989 cycles/day but curtailed 28,475 kWh/year (vs ~10k for model_7) because the agent refused profitable cycles, wasting free solar. Economic savings dropped from 1.47M (model_7) to 483k UAH. Rolled back to 2.5 — the goal is economically optimal cycling, not minimizing cycle count at any cost. |
 | 30 | `environment/models/best/` | ✅ Done | Model_10 trained (SAC_72). Economic savings 459k UAH, cycles/day 1.12. |
-| 31 | `environment/environment.py`, `train.py` | ⚠️ Pending | **Model_11 retrain required.** Fixes applied: PRICE_LOOKAHEAD 32→96 (obs 98→163), r_lcos 2.5→3.0, r_solar_priority 2.0→4.0, r_eod_soc added (end-of-day carry bonus), tomorrow solar summary feature added. train.py: 20M steps, 2M buffer, n_eval_episodes=50, LR step decay. Run: `cd environment && ../.venv/bin/python train.py` |
+| 31 | `environment/environment.py`, `train.py` | ✅ Done | Model_11 trained with: PRICE_LOOKAHEAD 32→96 (obs 98→163), r_lcos 2.5→3.0, r_solar_priority 2.0→4.0, r_eod_soc added (end-of-day carry bonus), tomorrow solar summary feature. Saved model verified at obs_space (163,). |
 | 32 | `frontend/src/App.jsx` | ✅ Done | Full dashboard implemented: 4 tabs (SAC/Default/Порівняти/Історія), 5 KPI cards, flow charts, battery P&L charts, compare mode (SAC vs Default side-by-side), settings modal for creating configs and strategies from the UI. |
+| 33 | `backend/models/site.py`, `prediction_service.py` | ✅ Fixed | `reward_price_timing`, `reward_solar_priority`, `reward_eod_soc` columns added to `AgentPredictions` ORM and stored in `_build_rows()`. **Existing DBs need:** `ALTER TABLE predictions ADD COLUMN reward_price_timing FLOAT; ALTER TABLE predictions ADD COLUMN reward_solar_priority FLOAT; ALTER TABLE predictions ADD COLUMN reward_eod_soc FLOAT;` |
+| 34 | `environment/inference.py` | ✅ Fixed | `reward_eod_soc` was missing from the dispatch plan step dict; now captured from `info['reward_eod_soc']`. |
+| 35 | `run_live.py` | ✅ Fixed | Typo `"envoriment"` → `"environment"` in `os.chdir()` and model paths (×3). Also fixed `system_config['grid']` key `grid_capacity` → `capacity` and removed nonexistent `price_to_buy` field that would have caused a `KeyError` in the environment. |
 
 ---
 
@@ -573,6 +577,6 @@ Current `requirements.txt` (complete — no missing deps):
 fastapi, uvicorn, pandas, numpy, requests, openmeteo-requests, requests-cache,
 retry-requests, gymnasium, python-calamine, sqlalchemy, psycopg2-binary, pyjwt,
 python-dotenv, pwdlib, pydantic, scikit-learn, stable-baselines3, torch,
-tensorboard, openpyxl
+tensorboard, openpyxl, pymodbus>=3.6
 ```
 

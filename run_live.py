@@ -8,7 +8,6 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-# ── paths ──────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT / "envoriment")
@@ -45,7 +44,6 @@ SYSTEM_CONFIG = {
     },
 }
 
-
 def build_dataset(today, tilt, azimuth) -> pd.DataFrame:
     print("Fetching DAM prices...")
     dam = fetch_DAM(today)
@@ -74,7 +72,6 @@ def build_dataset(today, tilt, azimuth) -> pd.DataFrame:
     cols = df.columns.tolist()
     df = df[['timestamp'] + [c for c in cols if c != 'timestamp']]
     return df
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -113,7 +110,6 @@ def main():
 
     plan = pd.DataFrame(result['dispatch_plan'])
 
-    # ── summary ────────────────────────────────────────────────────────
     s = result['summary']
     print(f"\n{'='*60}")
     print("ПІДСУМКИ")
@@ -127,7 +123,6 @@ def main():
     print(f"  Деградація батареї:  {s['lcos_total_uah']:.3f} UAH")
     print(f"  SoC: {s['initial_soc']:.0%} → {s['final_soc']:.0%}")
 
-    # ── dispatch plan preview ──────────────────────────────────────────
     print(f"\n{'='*60}")
     print("DISPATCH PLAN (перші 12 кроків — перші 3 год)")
     print(f"{'='*60}")
@@ -139,7 +134,6 @@ def main():
     out_csv.parent.mkdir(exist_ok=True)
     plan.to_csv(out_csv, index=False)
     print(f"\nПовний dispatch plan → {out_csv}")
-
 
 if __name__ == '__main__':
     main()

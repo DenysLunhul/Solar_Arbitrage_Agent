@@ -6,7 +6,6 @@ import {
 } from "recharts";
 import * as api from "./api.js";
 
-// ─── Helpers ─────────────────────────────────────────────────────────
 const clamp  = (v, a, b) => Math.min(b, Math.max(a, v));
 const fmt    = (n, d = 2) => typeof n === "number" ? n.toFixed(d) : "—";
 const fmtTs  = (ts) => ts ? String(ts).slice(11, 16) : "—";
@@ -39,7 +38,6 @@ const computeSummary = (plan) => {
 
 const buildTime = (r, i) => r.timestamp ? fmtTs(r.timestamp) : fmtT(i);
 
-// ─── CSS ─────────────────────────────────────────────────────────────
 const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -227,7 +225,6 @@ const CSS = `
   .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
 `;
 
-// ─── Tooltip ─────────────────────────────────────────────────────────
 const CT = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
@@ -244,7 +241,6 @@ const CT = ({ active, payload, label }) => {
   );
 };
 
-// ─── SelField ─────────────────────────────────────────────────────────
 function SelField({ label, value, onChange, options, placeholder, onRefresh, editable = false }) {
   return (
     <div className="field">
@@ -266,7 +262,6 @@ function SelField({ label, value, onChange, options, placeholder, onRefresh, edi
   );
 }
 
-// ─── Login ────────────────────────────────────────────────────────────
 function Login({ onLogin }) {
   const [tab,     setTab]     = useState("login");
   const [user,    setUser]    = useState("");

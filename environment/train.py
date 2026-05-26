@@ -12,7 +12,6 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 
 from environment import Environment
 
-
 def lr_schedule(progress_remaining: float) -> float:
     """Step decay: 1e-4 for the first 60%, 5e-5 for 60-80%, 2.5e-5 for the final 20%.
     Stabilises the critic in late training where oscillations previously prevented improvement."""
@@ -22,7 +21,6 @@ def lr_schedule(progress_remaining: float) -> float:
         return 5e-5
     else:
         return 2.5e-5
-
 
 CONFIG = {
     'dataset_path':    'dataset_normalized.csv',
@@ -34,32 +32,32 @@ CONFIG = {
 
     'total_timesteps': 20_000_000,
     'eval_freq':       100_000,
-    'log_interval':    100_000,  # large value — suppress SB3 default episode logging
-    'n_envs':          32,       # DummyVecEnv: no IPC overhead, env step ~0.11 ms each
+    'log_interval':    100_000,
+    'n_envs':          32,
 
     'sac_params': {
         'device':          'cuda',
         'buffer_size':     2_000_000,
-        'learning_starts': 50_000,   # 50k / 32 envs ≈ 1562 steps/env (~16 full episodes) before first update
+        'learning_starts': 50_000,
         'batch_size':      512,
-        'learning_rate':   lr_schedule,  # step decay 1e-4→5e-5→2.5e-5; stabilises critic in late training
+        'learning_rate':   lr_schedule,
         'gamma':           0.99,
-        'tau':             0.002,    # slower target-net update → more stable critic
+        'tau':             0.002,
         'ent_coef':        'auto',
         'policy_kwargs': {
             'net_arch': [512, 512],
         },
         'verbose': 0,
         'seed':    42,
-        'target_entropy': -1.0,     # explicit: 'auto'=-2 allows near-deterministic collapse; -1.0 keeps policy stochastic
+        'target_entropy': -1.0,
     }
 }
 
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
         'capacity_kwh':        150.0,
-        'max_charge_power':     75.0,  # C/2
-        'max_discharge_power':  75.0,  # C/2
+        'max_charge_power':     75.0,
+        'max_discharge_power':  75.0,
         'efficiency':          0.95,
         'lcos':                1.15,
         'min_reserve':         20,
@@ -76,10 +74,8 @@ DEFAULT_SYSTEM_CONFIG = {
     },
 }
 
-
-# Domain randomization: each reset() samples a new hardware config so the model
-# learns to operate correctly across diverse battery/solar/inverter/grid sizes.
 class RandomConfigWrapper(gym.Wrapper):
+
     def __init__(self, df: pd.DataFrame, df_raw: pd.DataFrame, episode_len: int = 96):
         self.df = df
         self.df_raw = df_raw
@@ -117,7 +113,6 @@ class RandomConfigWrapper(gym.Wrapper):
         self.env = Environment(df_raw=self.df_raw, df=self.df, system_config=self._sample_config(), episode_len=self.episode_len)
         return self.env.reset(**kwargs)
 
-
 def load_data():
     df     = pd.read_csv(CONFIG['dataset_path'])
     df_raw = pd.read_csv(CONFIG['dataset_raw_path'])
@@ -125,7 +120,7 @@ def load_data():
     train_idx, eval_idx = [], []
     for month in range(1, 13):
         idx = df_raw.index[df_raw['Month'] == month].tolist()
-        split = int(len(idx) * 0.75)   # ~3 weeks train, ~1 week eval per month
+        split = int(len(idx) * 0.75)
         train_idx.extend(idx[:split])
         eval_idx.extend(idx[split:])
 
@@ -139,12 +134,13 @@ def load_data():
 
     return df_train, df_train_raw, df_eval, df_eval_raw
 
-
 def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
     os.makedirs(CONFIG['monitor_dir'], exist_ok=True)
 
     n = CONFIG['n_envs']
+
     def make_train_env(i):
+
         def _init():
             return Monitor(
                 RandomConfigWrapper(df_train, df_train_raw),
@@ -152,8 +148,6 @@ def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
             )
         return _init
 
-    # DummyVecEnv (single process, no IPC): faster than SubprocVecEnv when env step < pipe overhead.
-    # Benchmarked: env step = 0.11 ms, SubprocVecEnv pipe = ~13 ms → DummyVecEnv wins 7×.
     train_env = DummyVecEnv([make_train_env(i) for i in range(n)])
 
     eval_env = DummyVecEnv([
@@ -163,11 +157,10 @@ def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
         )
     ])
 
-    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=100.0)  # 10.0 clipped r_unmet events (-587 norm) to -10, losing signal; 100.0 preserves differentiation
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=100.0)
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     return train_env, eval_env
-
 
 def make_model(train_env):
     print("\n" + "="*60)
@@ -189,7 +182,6 @@ def make_model(train_env):
     print(f"Architecture: {CONFIG['sac_params']['policy_kwargs']['net_arch']}")
 
     return model
-
 
 class StatsCallback(BaseCallback):
     """Prints one summary line to stdout every `log_every` env steps."""
@@ -215,7 +207,6 @@ class StatsCallback(BaseCallback):
             self._last_log = self.num_timesteps
         return True
 
-
 class SyncNormalizeEvalCallback(EvalCallback):
     """EvalCallback that copies obs_rms from train_env → eval_env before each evaluation,
     and saves obs_rms to disk whenever a new best_model.zip is written.
@@ -224,6 +215,7 @@ class SyncNormalizeEvalCallback(EvalCallback):
     Without saving obs_rms at the best checkpoint, inference uses end-of-training
     normalisation stats against mid-training weights — a distribution mismatch.
     """
+
     def __init__(self, train_env: VecNormalize, obs_rms_path: str, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._train_env   = train_env
@@ -234,16 +226,13 @@ class SyncNormalizeEvalCallback(EvalCallback):
         if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
             self.eval_env.obs_rms = copy.deepcopy(self._train_env.obs_rms)
         result = super()._on_step()
-        # Save obs_rms at the exact step where best_model.zip was written.
         if self.best_mean_reward > self._prev_best:
             self._prev_best = self.best_mean_reward
             with open(self._obs_rms_path, 'wb') as f:
                 pickle.dump(self._train_env.obs_rms, f)
         return result
 
-
 def make_callbacks(train_env, eval_env):
-    # SB3 _on_step() fires once per n_envs steps — divide to keep freq at intended absolute step count.
     freq = max(CONFIG['eval_freq'] // CONFIG['n_envs'], 1)
 
     eval_cb = SyncNormalizeEvalCallback(
@@ -262,7 +251,6 @@ def make_callbacks(train_env, eval_env):
 
     return CallbackList([eval_cb, stats_cb])
 
-
 def train(model, callbacks):
     print("\n" + "="*60)
     print("Training")
@@ -279,7 +267,6 @@ def train(model, callbacks):
     )
 
     return model
-
 
 def save_and_test(model, eval_env):
     print("\n" + "="*60)
@@ -314,7 +301,6 @@ def save_and_test(model, eval_env):
     print(f"Unmet load:   {total_unmet:.4f} kWh")
     print(f"Final SoC:    {last_info.get('soc', 0.0):.3f}")
     print(f"Earned:       {total_money_earned:.2f} UAH")
-
 
 if __name__ == '__main__':
     os.chdir(os.path.dirname(os.path.abspath(__file__)))

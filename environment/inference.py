@@ -4,7 +4,6 @@ import argparse
 import pickle
 import numpy as np
 import pandas as pd
-
 try:
     from environment import Environment
     from normalize import normalize_row
@@ -23,14 +22,11 @@ def load_model_and_scalers(
     if model_cls is None:
         from stable_baselines3 import SAC
         model_cls = SAC
-
     print(f"Loading model:   {model_path}")
     model = model_cls.load(model_path)
-
     print(f"Loading scalers: {scalers_path}")
     with open(scalers_path, 'rb') as f:
         scalers = pickle.load(f)
-
     obs_rms = None
     if obs_rms_path and os.path.exists(obs_rms_path):
         print(f"Loading obs_rms: {obs_rms_path}")
@@ -38,7 +34,6 @@ def load_model_and_scalers(
             obs_rms = pickle.load(f)
     else:
         print("obs_rms not found — observation normalisation disabled")
-
     print("Done.\n")
     return model, scalers, obs_rms
 
@@ -68,24 +63,16 @@ def run_inference(
     """Run the trained model on df_raw and return dispatch_plan + summary."""
     import warnings
     warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
-
     df_norm = pd.DataFrame([
         normalize_row(df_raw.iloc[i], scalers)
         for i in range(len(df_raw))
     ])
-
     env = Environment(df_raw=df_raw, df=df_norm, system_config=system_config)
-
     obs, _ = env.reset()
     env.soc = float(np.clip(initial_soc, 0.0, 1.0))
     obs = env.get_observe()
-
-    # Validate obs_rms shape against current env obs — mismatches happen when
-    # obs_rms was saved from a training run with a different observation space.
     obs_rms = _check_obs_rms(obs_rms, obs.shape[0])
-
     dispatch_plan = []
-
     while True:
         if obs_rms is not None:
             obs_input = np.clip(
@@ -94,10 +81,8 @@ def run_inference(
             ).astype(np.float32)
         else:
             obs_input = obs
-
         action, _ = model.predict(obs_input, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
-
         dispatch_plan.append({
             'step':              env.curr_step - 1,
             'action_battery':    round(float(action[0]), 4),
@@ -126,29 +111,22 @@ def run_inference(
             'reward_curtail':         round(float(info['reward_curtail']), 4),
             'reward_price_timing':    round(float(info['reward_price_timing']), 4),
             'reward_solar_priority':  round(float(info['reward_solar_priority']), 4),
+            'reward_eod_soc':         round(float(info['reward_eod_soc']), 4),
         })
-
         if terminated or truncated:
             break
-
     _total_money_earned = round(sum(x['money_earned_ts'] for x in dispatch_plan))
     _bought_kwh  = round(sum(x['grid_kwh'] for x in dispatch_plan if x['grid_kwh'] > 0), 3)
     _sold_kwh    = round(sum(abs(x['grid_kwh']) for x in dispatch_plan if x['grid_kwh'] < 0), 3)
     _solar_kwh   = round(sum(x['solar_gen_kwh'] for x in dispatch_plan), 3)
     _lcos_uah    = round(sum(x['lcos_cost'] for x in dispatch_plan), 3)
-
-    # Avg price paid when buying (UAH/kWh) — used for solar-savings estimate.
     _total_bought_cost = sum(-x['money_earned_ts'] for x in dispatch_plan if x['grid_kwh'] > 0)
     _avg_buy_price     = (_total_bought_cost / _bought_kwh) if _bought_kwh > 0 else 8.0
-
-    # Economic savings vs a hypothetical grid-only baseline (no solar/battery).
-    # Curtailed solar is excluded — it was neither self-consumed nor sold.
     _curtailed_kwh       = round(sum(x['curtailed_kwh'] for x in dispatch_plan), 3)
     _solar_self_consumed = max(0.0, _solar_kwh - _sold_kwh - _curtailed_kwh)
     _economic_savings    = round(
         _total_money_earned + _solar_self_consumed * _avg_buy_price - _lcos_uah, 2
     )
-
     summary = {
         'total_money_earned':  _total_money_earned,
         'economic_savings_uah': _economic_savings,
@@ -163,17 +141,16 @@ def run_inference(
         'final_soc':           dispatch_plan[-1]['soc'] if dispatch_plan else initial_soc,
         'steps':               len(dispatch_plan),
     }
-
     return {'dispatch_plan': dispatch_plan, 'summary': summary}
 
 
 DEFAULT_SYSTEM_CONFIG = {
     'battery': {
         'capacity_kwh':        250.0,
-        'max_charge_power':    125.0,   # C/2 — matches training distribution
-        'max_discharge_power': 125.0,   # C/2 — matches training distribution
+        'max_charge_power':    125.0,
+        'max_discharge_power': 125.0,
         'efficiency':          0.95,
-        'lcos':                1.15,    # within training range [0.95, 1.25]
+        'lcos':                1.15,
         'min_reserve':         20,
     },
     'solar': {
@@ -215,13 +192,10 @@ if __name__ == '__main__':
     import json
     import sys
     from pathlib import Path
-
     _ROOT    = Path(__file__).resolve().parent.parent
     _ENV_DIR = _ROOT / 'environment'
-
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--model',   default=str(_ENV_DIR / 'models' / 'best' / 'best_model.zip'))
     parser.add_argument('--scalers', default=str(_ENV_DIR / 'models' / 'scalers.pkl'))
@@ -232,7 +206,6 @@ if __name__ == '__main__':
     parser.add_argument('--tilt',    type=float, default=35.0, help='Solar panel tilt (degrees)')
     parser.add_argument('--azimuth', type=float, default=0.0,  help='Solar panel azimuth (degrees)')
     args = parser.parse_args()
-
     if args.config:
         with open(args.config) as f:
             system_config = json.load(f)
@@ -240,9 +213,7 @@ if __name__ == '__main__':
     else:
         system_config = DEFAULT_SYSTEM_CONFIG
         print("Config: DEFAULT_SYSTEM_CONFIG")
-
     model, scalers, obs_rms = load_model_and_scalers(args.model, args.scalers, args.obsrms)
-
     _COMBINED = _ROOT / 'data_providers' / 'orchestrator' / 'combined.csv'
     try:
         from data_providers.orchestrator.data_combiner import combine
@@ -256,14 +227,11 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Orchestrator error ({e}) — falling back to cached combined.csv")
         df = pd.read_csv(_COMBINED)
-
     df = df.iloc[:96].reset_index(drop=True)
     print(f"Date: {str(df['timestamp'].iloc[0])[:10]}")
-
     nan_dam_cols = [c for c in ('DAM_Price', 'DAM_Vol_Sale', 'DAM_Vol_Buy') if df[c].isnull().all()]
     if nan_dam_cols:
         raise SystemExit(f"ERROR: DAM data missing ({', '.join(nan_dam_cols)} are all NaN) — OREE fetch failed. Inference aborted.")
-
     min_reserve = system_config['battery']['min_reserve'] / 100
     if args.soc is not None:
         initial_soc = args.soc
@@ -272,7 +240,6 @@ if __name__ == '__main__':
         initial_soc, label = _fetch_soc_from_db(min_reserve)
         print(f"SoC:  {initial_soc:.3f} ({label})")
     print()
-
     result = run_inference(
         df_raw=df,
         system_config=system_config,
@@ -281,13 +248,11 @@ if __name__ == '__main__':
         initial_soc=initial_soc,
         obs_rms=obs_rms,
     )
-
     print("\n" + "=" * 50)
     print("SUMMARY")
     print("=" * 50)
     for k, v in result['summary'].items():
         print(f"  {k:25s} {v}")
-
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(result['dispatch_plan']).to_csv(output_path, index=False)

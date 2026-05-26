@@ -1,6 +1,5 @@
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
-
 from backend.repositories import strategy_repo
 from backend.schemas.schemas import DefaultStrategyConfig
 

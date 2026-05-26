@@ -5,19 +5,16 @@ from datetime import timedelta, date
 
 
 def fetch_DAM(today: date) -> pd.DataFrame:
-
     DAM_RENAME = {
         "Ціна, грн/МВт.год": "DAM_Price",
         "Обсяг купівлі, МВт.год": "DAM_Vol_Buy",
         "Обсяг продажу, МВт.год": "DAM_Vol_Sale"
     }
-
     current_date = today + timedelta(days=1)
     date_structure = current_date.strftime("%d.%m.%Y")
     file_date_str = current_date.strftime("%Y-%m-%d")
     DAM_drop_columns = ["Заявлений обсяг продажу, МВт.год","Заявлений обсяг купівлі, МВт.год",
                         "Година"]
-
     url = f"https://www.oree.com.ua/index.php/PXS/downloadxlsx/{date_structure}/DAM/2"
     print(f"Downloading DAM data for {file_date_str}...")
     try:

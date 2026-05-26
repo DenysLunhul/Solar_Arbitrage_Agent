@@ -1,13 +1,10 @@
 import pandas as pd
 from datetime import datetime
-
 from data_providers.components.grid.synthetic_grid import fetch_grid
 from data_providers.components.load.synthetic_load import fetch_load
 from data_providers.components.market_manager.DAM_features import fetch_DAM
 from data_providers.components.weather.weather import fetch_weather
 from data_providers.components.time.time_features import fetch_time
-
-
 from backend.core.database import SessionLocal
 from backend.models.site import SystemConfig
 
@@ -28,7 +25,6 @@ def get_solar_parameters(config_id):
 def combine(config_id, tilt=None, azimuth=None):
     if tilt is None or azimuth is None:
         tilt, azimuth = get_solar_parameters(config_id)
-
     today = datetime.today()
     time = fetch_time(today)
     grid = fetch_grid(today)
@@ -38,7 +34,6 @@ def combine(config_id, tilt=None, azimuth=None):
         return None
     weather = fetch_weather(today, tilt, azimuth)
     dataset = pd.concat([time, grid, load, weather, DAM], axis=1)
-
     for col in ('DAM_Price', 'DAM_Vol_Sale', 'DAM_Vol_Buy'):
         if col in dataset.columns:
             dataset[col] = pd.to_numeric(
@@ -51,9 +46,9 @@ def combine(config_id, tilt=None, azimuth=None):
 
     def _make_ts(r):
         month, day = int(r['Month']), int(r['Day'])
-        # Detect Dec-31 → Jan-1 rollover: data month/day is earlier in calendar than today
         year = today.year + 1 if (month, day) < (today.month, today.day) else today.year
         return datetime(year, month, day, int(r['Hour']), int(r['Minute']))
+
     dataset['timestamp'] = dataset.apply(_make_ts, axis=1)
     cols = dataset.columns.tolist()
     cols = [cols[-1]] + cols[:-1]

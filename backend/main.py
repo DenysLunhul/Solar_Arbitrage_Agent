@@ -5,10 +5,8 @@ from sqlalchemy import text
 from backend.models import site
 from backend.core.database import engine, Base, SessionLocal
 from backend.routers import config, auth, predictions, strategy
-
 Base.metadata.create_all(bind=engine)
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,16 +14,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.include_router(auth.router)
 app.include_router(config.router)
 app.include_router(predictions.router)
 app.include_router(strategy.router)
-
 @app.get("/")
 def home_page():
     return {"message": "Welcome page!"}
-
 @app.get("/health")
 def health():
     try:

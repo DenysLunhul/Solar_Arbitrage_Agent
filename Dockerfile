@@ -6,8 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /
 
 COPY requirements.txt .
 
-# CPU-only torch keeps the image ~2 GB instead of ~6 GB; swap index URL for GPU builds
-RUN pip install --no-cache-dir torch --extra-index-url https://download.pytorch.org/whl/gpu
+RUN pip install --no-cache-dir torch --extra-index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .

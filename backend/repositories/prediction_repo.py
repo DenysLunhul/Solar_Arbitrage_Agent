@@ -1,7 +1,5 @@
 from datetime import date
-
 from sqlalchemy.orm import Session
-
 from backend.models.site import AgentPredictions
 
 

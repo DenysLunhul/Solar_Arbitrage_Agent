@@ -14,20 +14,18 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-_DIR = Path(__file__).resolve().parent.parent   # environment/
-sys.path.insert(0, str(_DIR.parent))            # project root
-sys.path.insert(0, str(_DIR))                   # environment/ — inference lives here
+_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_DIR.parent))
+sys.path.insert(0, str(_DIR))
 os.chdir(_DIR)
 
 from inference import load_model_and_scalers, run_inference
 
-# 150 kWh mid-range config — matches the fixed eval env used during SAC training.
-# Using this config ensures the backtest reflects the distribution the model optimised for.
 EVAL_SYSTEM_CONFIG = {
     'battery': {
         'capacity_kwh':        150.0,
-        'max_charge_power':     75.0,   # C/2
-        'max_discharge_power':  75.0,   # C/2
+        'max_charge_power':     75.0,
+        'max_discharge_power':  75.0,
         'efficiency':          0.95,
         'lcos':                1.15,
         'min_reserve':         20,
@@ -45,7 +43,6 @@ EVAL_SYSTEM_CONFIG = {
 }
 
 RESULTS_DIR = Path(__file__).resolve().parent / 'results'
-
 
 def run(
     dataset_path: str,
@@ -106,7 +103,6 @@ def run(
     summary_df = summary_df[[c for c in sum_cols if c in summary_df.columns]]
 
     return dispatch_df, summary_df
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

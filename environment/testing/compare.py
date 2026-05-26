@@ -12,7 +12,6 @@ from pathlib import Path
 
 RESULTS = Path(__file__).resolve().parent / 'results'
 
-
 def load(name: str) -> pd.DataFrame | None:
     path = RESULTS / f'{name}_summary.csv'
     if not path.exists():
@@ -20,10 +19,8 @@ def load(name: str) -> pd.DataFrame | None:
         return None
     return pd.read_csv(path)
 
-
 def fmt(val: float, unit: str = '') -> str:
     return f"{val:>12.2f}{unit}"
-
 
 def main():
     sac     = load('sac')
@@ -53,7 +50,7 @@ def main():
         if col == 'total_money_earned':
             d_val = default['total_money_earned'].sum() if default is not None else None
             s_val = sac['total_money_earned'].sum()     if sac is not None else None
-        elif col is None:  # avg daily
+        elif col is None:
             d_val = default['total_money_earned'].mean() if default is not None else None
             s_val = sac['total_money_earned'].mean()     if sac is not None else None
         else:
@@ -94,7 +91,6 @@ def main():
             print(f"  {m:<8} {d:>10.1f} {s:>10.1f} {sign}{delta:>9.1f}")
 
     print()
-
 
 if __name__ == '__main__':
     main()
