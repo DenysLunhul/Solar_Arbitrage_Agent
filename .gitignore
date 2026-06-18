@@ -7,13 +7,26 @@ __pycache__/
 .env
 .claude
 
+# Python virtual environment
+.venv/
+venv/
+
 # Generated data / live pipeline outputs
 data_providers/orchestrator/combined.csv
 
-# Training artifacts (large binaries / auto-generated logs)
-environment/models/checkpoints/
+# ML model artifacts (large binaries — distribute via storage/DVC separately)
+environment/models/
 environment/logs/monitor/
 environment/logs/eval/
 environment/logs/tensorboard/
 environment/results/
 environment/testing/results/
+
+# One-off utility scripts and old experiment archives
+temp/
+temp_scripts/
+
+# Frontend build artifacts and dependencies
+frontend/node_modules/
+frontend/dist/
+frontend/.env
