@@ -1,10 +1,10 @@
 fastapi
 uvicorn
+python-multipart
 pandas
 numpy
 requests
 openmeteo-requests
-requests-cache
 retry-requests
 gymnasium
 python-calamine
@@ -13,12 +13,12 @@ psycopg2-binary
 pyjwt
 python-dotenv
 pwdlib
+argon2-cffi
 pydantic
 scikit-learn
 stable-baselines3
 torch
 tensorboard
-openpyxl
 pymodbus>=3.6
 rich
 tqdm
