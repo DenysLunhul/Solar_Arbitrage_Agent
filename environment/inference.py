@@ -23,7 +23,7 @@ def load_model_and_scalers(
         from stable_baselines3 import SAC
         model_cls = SAC
     print(f"Loading model:   {model_path}")
-    model = model_cls.load(model_path)
+    model = model_cls.load(model_path, device='cpu')
     print(f"Loading scalers: {scalers_path}")
     with open(scalers_path, 'rb') as f:
         scalers = pickle.load(f)
