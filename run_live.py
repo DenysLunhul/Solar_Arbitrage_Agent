@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-os.chdir(ROOT / "envoriment")
+os.chdir(ROOT / "environment")
 
 import pandas as pd
 
@@ -39,8 +39,7 @@ SYSTEM_CONFIG = {
         'efficiency':   0.95,
     },
     'grid': {
-        'grid_capacity': 100.0,
-        'price_to_buy':  7.0,
+        'capacity': 100.0,
     },
 }
 
@@ -94,9 +93,9 @@ def main():
     print(f"Raw data saved → {raw_csv}  ({len(df_raw)} rows)\n")
 
     model, scalers, obs_rms = load_model_and_scalers(
-        model_path=str(ROOT / "envoriment" / "models" / "best" / "best_model.zip"),
-        scalers_path=str(ROOT / "envoriment" / "models" / "scalers.pkl"),
-        obs_rms_path=str(ROOT / "envoriment" / "models" / "obs_rms.pkl"),
+        model_path=str(ROOT / "environment" / "models" / "best" / "best_model.zip"),
+        scalers_path=str(ROOT / "environment" / "models" / "scalers.pkl"),
+        obs_rms_path=str(ROOT / "environment" / "models" / "obs_rms.pkl"),
     )
 
     result = run_inference(
