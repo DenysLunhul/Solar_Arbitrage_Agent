@@ -85,7 +85,7 @@ ds_project_demo/
 │       ├── main.jsx                       # React root mount
 │       ├── api.js                         # All API calls + JWT token management
 │       └── App.jsx                        # Full dashboard (login, charts, table, history)
-├── run_live.py                            # CLI: fetch tomorrow's data + run SAC inference (standalone)
+├── run_live.py                            # CLI: fetch tomorrow's data + run SAC inference (--soc --tilt --azimuth --load-peak --load-profile)
 └── temp/                                  # One-off data-cleaning utility scripts
 ```
 
@@ -363,6 +363,7 @@ result = run_inference(
 
 **Standalone `__main__` mode** (`python environment/inference.py`):
 - Calls `data_combiner.combine()` for live data; falls back to `combined.csv` if DAM unavailable
+- The `--config` JSON's `load` section (`peak_kw`, `profile`) is forwarded into `combine()` so the live load matches the site config even without a DB
 - `--soc` arg is optional; if omitted, queries DB for last prediction SoC (clamped to `min_reserve`); defaults to 0.5 if DB unavailable
 - Args: `--model`, `--scalers`, `--obsrms`, `--config` (JSON), `--output`, `--soc`, `--tilt`, `--azimuth`
 
