@@ -346,6 +346,7 @@ function SettingsModal({ onClose, onSaved }) {
     battery_efficiency: "0.95", inverter_max_power: "100", inverter_efficiency: "0.95",
     solar_peak_power: "100", solar_efficiency: "0.20", solar_tilt: "35", solar_azimuth: "0",
     grid_capacity: "100",
+    load_peak_kw: "60", load_profile: "office",
   });
 
   // Strategy state
@@ -386,6 +387,7 @@ function SettingsModal({ onClose, onSaved }) {
           solar_azimuth:     n(cfg.solar_azimuth),
         },
         grid: { grid_capacity: n(cfg.grid_capacity) },
+        load: { load_peak_kw: n(cfg.load_peak_kw), load_profile: cfg.load_profile },
       });
       setOk("Конфігурацію збережено!");
       onSaved();
@@ -477,6 +479,18 @@ function SettingsModal({ onClose, onSaved }) {
               <div className="form-section">Мережа</div>
               <div className="form-grid">
                 <F label="Ємність мережі (кВт)" k="grid_capacity" state={cfg} set={setC} step="1" min="0" />
+              </div>
+              <div className="form-section">Навантаження</div>
+              <div className="form-grid">
+                <F label="Пікове споживання (кВт)" k="load_peak_kw" state={cfg} set={setC} step="1" min="10" max="150" />
+                <div className="form-field">
+                  <label>Профіль споживання</label>
+                  <select value={cfg.load_profile} onChange={e => setC("load_profile", e.target.value)}>
+                    <option value="office">Офіс (день, вихідні ↓)</option>
+                    <option value="two_shift">Дві зміни (06–22)</option>
+                    <option value="flat">Постійне 24/7</option>
+                  </select>
+                </div>
               </div>
             </>
           )}
