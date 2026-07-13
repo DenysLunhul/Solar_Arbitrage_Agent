@@ -1,6 +1,9 @@
 import copy
 import os
 import pickle
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import gymnasium as gym
@@ -10,7 +13,12 @@ from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, Callb
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
+# project root appended (not prepended) so `environment` still resolves to
+# environment.py in this directory rather than the environment/ package
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 from environment import Environment
+from data_providers.components.load.load_profiles import PROFILES, generate_series
 
 def lr_schedule(progress_remaining: float) -> float:
     """Step decay: 1e-4 for the first 60%, 5e-5 for 60-80%, 2.5e-5 for the final 20%.
@@ -72,6 +80,10 @@ DEFAULT_SYSTEM_CONFIG = {
     'grid': {
         'capacity': 220.0,
     },
+    'load': {
+        'peak_kw': 60.0,
+        'profile': 'office',
+    },
 }
 
 class RandomConfigWrapper(gym.Wrapper):
@@ -80,13 +92,20 @@ class RandomConfigWrapper(gym.Wrapper):
         self.df = df
         self.df_raw = df_raw
         self.episode_len = episode_len
-        env = Environment(df_raw=df_raw, df=df, system_config=self._sample_config(), episode_len=episode_len)
-        super().__init__(env)
+        self._hours   = df_raw['Hour'].values
+        self._minutes = df_raw['Minute'].values
+        self._dow     = df_raw['Day_of_week'].values
+        super().__init__(self._make_env())
 
     def _sample_config(self) -> dict:
-        capacity      = float(np.random.uniform(50, 250))
-        solar_peak    = float(capacity * np.random.uniform(0.8, 2.0))
-        inverter_max  = float(solar_peak * np.random.uniform(0.8, 1.1))
+        # Load-first correlated sampling: the site's consumption sets the scale,
+        # hardware is sized around it so combos stay realistic.
+        profile       = str(np.random.choice(PROFILES))
+        peak_load     = float(np.random.uniform(10.0, 150.0))                    # kW
+        capacity      = float(peak_load * np.random.uniform(1.5, 5.0))           # 1.5-5 h of peak load
+        solar_peak    = float(peak_load * np.random.uniform(0.6, 2.5))
+        inverter_max  = float(max(solar_peak * np.random.uniform(0.8, 1.1),
+                                  peak_load  * np.random.uniform(1.1, 1.4)))     # headroom over peak+noise/spikes
         grid_capacity = float(inverter_max * np.random.uniform(1.0, 1.5))
         return {
             'battery': {
@@ -107,10 +126,22 @@ class RandomConfigWrapper(gym.Wrapper):
             'grid': {
                 'capacity': grid_capacity,
             },
+            'load': {
+                'peak_kw': peak_load,
+                'profile': profile,
+            },
         }
 
+    def _make_env(self) -> Environment:
+        config = self._sample_config()
+        rng = np.random.default_rng(np.random.randint(2**31))
+        load_kw = generate_series(config['load']['profile'], config['load']['peak_kw'],
+                                  self._hours, self._minutes, self._dow, rng)
+        return Environment(df_raw=self.df_raw, df=self.df, system_config=config,
+                           episode_len=self.episode_len, load_kw=load_kw)
+
     def reset(self, **kwargs):
-        self.env = Environment(df_raw=self.df_raw, df=self.df, system_config=self._sample_config(), episode_len=self.episode_len)
+        self.env = self._make_env()
         return self.env.reset(**kwargs)
 
 def load_data():
