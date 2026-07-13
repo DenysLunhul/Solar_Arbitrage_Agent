@@ -40,6 +40,10 @@ EVAL_SYSTEM_CONFIG = {
     'grid': {
         'capacity': 220.0,
     },
+    'load': {
+        'peak_kw': 60.0,
+        'profile': 'office',
+    },
 }
 
 RESULTS_DIR = Path(__file__).resolve().parent / 'results'

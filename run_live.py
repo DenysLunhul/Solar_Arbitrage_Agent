@@ -1,6 +1,6 @@
 """
 run_live.py — fetch tomorrow's data and run SAC inference.
-Usage: python run_live.py [--soc 0.5] [--tilt 35] [--azimuth 0]
+Usage: python run_live.py [--soc 0.5] [--tilt 35] [--azimuth 0] [--load-peak 60] [--load-profile office]
 """
 import sys
 import os
@@ -16,6 +16,7 @@ import pandas as pd
 from data_providers.components.time.time_features import fetch_time
 from data_providers.components.grid.synthetic_grid import fetch_grid
 from data_providers.components.load.synthetic_load import fetch_load
+from data_providers.components.load.load_profiles import PROFILES, DEFAULT_PEAK_KW, DEFAULT_PROFILE
 from data_providers.components.weather.weather import fetch_weather
 from data_providers.components.market_manager.DAM_features import fetch_DAM
 from environment.inference import load_model_and_scalers, run_inference
@@ -40,9 +41,13 @@ SYSTEM_CONFIG = {
     'grid': {
         'capacity': 100.0,
     },
+    'load': {
+        'peak_kw': DEFAULT_PEAK_KW,
+        'profile': DEFAULT_PROFILE,
+    },
 }
 
-def build_dataset(today, tilt, azimuth) -> pd.DataFrame:
+def build_dataset(today, tilt, azimuth, load_peak_kw, load_profile) -> pd.DataFrame:
     print("Fetching DAM prices...")
     dam = fetch_DAM(today)
     if dam is None:
@@ -57,7 +62,7 @@ def build_dataset(today, tilt, azimuth) -> pd.DataFrame:
     print("Building time / grid / load features...")
     time   = fetch_time(today)
     grid   = fetch_grid(today)
-    load   = fetch_load(today)
+    load   = fetch_load(today, load_peak_kw, load_profile)
 
     df = pd.concat([time, grid, load, weather, dam], axis=1)
 
@@ -76,7 +81,11 @@ def main():
     parser.add_argument('--soc',     type=float, default=0.5,  help='Initial battery SoC (0-1)')
     parser.add_argument('--tilt',    type=float, default=35.0, help='Solar panel tilt (degrees)')
     parser.add_argument('--azimuth', type=float, default=0.0,  help='Solar panel azimuth (degrees)')
+    parser.add_argument('--load-peak',    type=float, default=DEFAULT_PEAK_KW, help='Site peak load (kW)')
+    parser.add_argument('--load-profile', choices=PROFILES, default=DEFAULT_PROFILE, help='Consumption profile')
     args = parser.parse_args()
+
+    SYSTEM_CONFIG['load'] = {'peak_kw': args.load_peak, 'profile': args.load_profile}
 
     today = datetime.today()
     tomorrow_str = (today.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -85,7 +94,7 @@ def main():
     print(f"Live inference  |  tomorrow: {tomorrow_str}  |  initial SoC: {args.soc:.0%}")
     print(f"{'='*60}\n")
 
-    df_raw = build_dataset(today, args.tilt, args.azimuth)
+    df_raw = build_dataset(today, args.tilt, args.azimuth, args.load_peak, args.load_profile)
 
     raw_csv = ROOT / "data_providers" / "orchestrator" / "combined.csv"
     df_raw.to_csv(raw_csv, index=False)

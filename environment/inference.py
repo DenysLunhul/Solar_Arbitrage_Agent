@@ -163,6 +163,10 @@ DEFAULT_SYSTEM_CONFIG = {
     'grid': {
         'capacity': 250.0,
     },
+    'load': {
+        'peak_kw': 60.0,
+        'profile': 'office',
+    },
 }
 
 
