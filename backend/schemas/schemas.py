@@ -27,12 +27,19 @@ class Grid(BaseModel):
     grid_capacity: float
 
 
+class LoadProfile(BaseModel):
+    load_peak_kw: float = Field(default=60.0, gt=0, le=1000)
+    load_profile: Literal['office', 'two_shift', 'flat'] = Field(default='office')
+
+
 class SiteConfig(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     battery: Battery
     inverter: Inverter
     solar: SolarPanel
     grid: Grid
+    # default_factory keeps configs stored before the load section existed parsing
+    load: LoadProfile = Field(default_factory=LoadProfile)
 
     def to_env_dict(self) -> dict:
         return {
@@ -53,6 +60,10 @@ class SiteConfig(BaseModel):
             },
             'grid': {
                 'capacity': self.grid.grid_capacity,
+            },
+            'load': {
+                'peak_kw': self.load.load_peak_kw,
+                'profile': self.load.load_profile,
             },
         }
 

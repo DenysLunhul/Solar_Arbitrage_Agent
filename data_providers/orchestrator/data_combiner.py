@@ -22,13 +22,28 @@ def get_solar_parameters(config_id):
     return 35, 0
 
 
-def combine(config_id, tilt=None, azimuth=None):
+def get_load_parameters(config_id):
+    try:
+        db = SessionLocal()
+        config_record = db.query(SystemConfig).filter(SystemConfig.id == config_id).first()
+        db.close()
+        if config_record and config_record.settings:
+            load = config_record.settings.get("load", {})
+            return load.get("load_peak_kw", 60.0), load.get("load_profile", "office")
+    except Exception:
+        pass
+    return 60.0, "office"
+
+
+def combine(config_id, tilt=None, azimuth=None, load_peak_kw=None, load_profile=None):
     if tilt is None or azimuth is None:
         tilt, azimuth = get_solar_parameters(config_id)
+    if load_peak_kw is None or load_profile is None:
+        load_peak_kw, load_profile = get_load_parameters(config_id)
     today = datetime.today()
     time = fetch_time(today)
     grid = fetch_grid(today)
-    load = fetch_load(today)
+    load = fetch_load(today, load_peak_kw, load_profile)
     DAM = fetch_DAM(today)
     if DAM is None:
         return None

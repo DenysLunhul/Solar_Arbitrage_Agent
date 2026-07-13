@@ -221,7 +221,10 @@ if __name__ == '__main__':
     _COMBINED = _ROOT / 'data_providers' / 'orchestrator' / 'combined.csv'
     try:
         from data_providers.orchestrator.data_combiner import combine
-        df = combine(0, tilt=args.tilt, azimuth=args.azimuth)
+        load_cfg = system_config.get('load', {})
+        df = combine(0, tilt=args.tilt, azimuth=args.azimuth,
+                     load_peak_kw=load_cfg.get('peak_kw', 60.0),
+                     load_profile=load_cfg.get('profile', 'office'))
         if df is not None:
             print(f"Data: fetched live from orchestrator ({len(df)} rows)")
             df.to_csv(_COMBINED, index=False)
