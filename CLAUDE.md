@@ -24,7 +24,7 @@ ds_project_demo/
 │   ├── normalize.py                       # Feature normalization: drop, scale, save scalers.pkl
 │   ├── default_strategy.py                # Configurable rule-based inverter dispatch (no price awareness)
 │   ├── dataset_final.csv                  # Copy of training dataset (25 cols, 35 041 rows)
-│   ├── dataset_normalized.csv             # Normalized training dataset (17 cols, used by train.py)
+│   ├── dataset_normalized.csv             # Normalized training dataset (16 cols, no Load — used by train.py)
 │   ├── models/
 │   │   ├── sac_ems.zip                    # Final SAC model (last training run)
 │   │   ├── best/best_model.zip            # Best checkpoint by eval reward ← used by API
@@ -47,7 +47,8 @@ ds_project_demo/
 │       ├── market_manager/DAM_features.py        # Fetches DAM prices from OREE (oree.com.ua)
 │       ├── weather/weather.py             # Open-Meteo forecast (GTI, temp, radiation) — plain requests.Session
 │       ├── grid/synthetic_grid.py         # Synthetic outage schedule generator
-│       ├── load/synthetic_load.py         # Synthetic consumption profile
+│       ├── load/load_profiles.py          # Shared load-shape generator (office/two_shift/flat) — single source of truth
+│       ├── load/synthetic_load.py         # fetch_load(today, peak_kw, profile) — thin wrapper over load_profiles
 │       └── time/time_features.py          # Cyclical time encoding (sin/cos)
 ├── datasets/
 │   └── dataset_v10/                       # CURRENT training dataset
@@ -122,9 +123,16 @@ LOAD_LOOKAHEAD  = 16  # steps of future Load appended to observation (4-hour hor
 GTI_LOOKAHEAD   = 16  # steps of future GTI appended to observation (4-hour horizon)
 
 action_space      = Box(low=-1.0, high=1.0, shape=(2,), dtype=float32)
-observation_space = Box(low=-inf, high=inf, shape=(163,), dtype=float32)
-# 17 normalized feature cols + SoC + 96 price fwd + 16 price hist + 16 load + 16 GTI + 1 tomorrow solar → shape (163,)
+observation_space = Box(low=-inf, high=inf, shape=(165,), dtype=float32)
+# 16 normalized feature cols (Load removed) + current relative load + SoC + 96 price fwd + 16 price hist
+# + 16 relative-load lookahead + 16 GTI + 1 tomorrow solar + load_cap_ratio + load_grid_ratio → shape (165,)
 ```
+
+**Relative load**: load enters the observation as `load_kw / load.peak_kw` (site-scale invariant), not
+StandardScaler-normalized. Two per-episode context scalars close the layout: `load_cap_ratio = peak_kw /
+capacity_kwh` and `load_grid_ratio = peak_kw / max_grid_capacity` — needed so the agent can infer
+`target_soc ≈ load × outage_h / capacity` under domain-randomized load AND hardware. The 163→165 obs change
+deliberately breaks old model artifacts loudly (shape error) instead of silently mis-normalizing.
 
 | Action dim | Meaning |
 |---|---|
@@ -153,8 +161,16 @@ system_config = {
     'grid': {
         'capacity':     float,          # kW; effective limit = min(inverter, grid)
     },
+    'load': {
+        'peak_kw':     float,           # site peak consumption (kW) — scales the profile & relative-load obs
+        'profile':     str,             # 'office' | 'two_shift' | 'flat'
+    },
 }
 ```
+
+The `load` section is optional in old config dicts — `Environment` defaults to `{'peak_kw': 60.0, 'profile': 'office'}`
+(today's behavior). `Environment.__init__` also accepts an optional `load_kw` numpy array (used by training-time
+randomization); when omitted, physics reads `df_raw['Load']`.
 
 `max_grid_capacity = min(inverter.max_power, grid.capacity)` — whichever is smaller is the real limit.
 
@@ -233,13 +249,14 @@ reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalize
 
 | Strategy | Columns |
 |---|---|
-| **Dropped** (8 cols) | `timestamp`, `Hour`, `Minute`, `Minute_sin`, `Minute_cos`, `Day`, `Day_of_week`, `Month` |
+| **Dropped** (9 cols) | `timestamp`, `Load`, `Hour`, `Minute`, `Minute_sin`, `Minute_cos`, `Day`, `Day_of_week`, `Month` |
 | **log1p → StandardScaler** | `DAM_Price` |
-| **StandardScaler** | `Load`, `Temperature_2m`, `Shortwave_radiation`, `DAM_Vol_Buy`, `DAM_Vol_Sale` |
+| **StandardScaler** | `Temperature_2m`, `Shortwave_radiation`, `DAM_Vol_Buy`, `DAM_Vol_Sale` |
 | **MinMaxScaler [0,1]** | `Global_tilted_irradiance_instant`, `hours_until_outage`, `outage_remaining_h`, `next_outage_duration` |
 | **Passthrough** | `Hour_sin`, `Hour_cos`, `Day_of_week_sin`, `Day_of_week_cos`, `Grid`, `Day_sin`, `Day_cos` |
 
-Result: 17-column `dataset_normalized.csv` + `scalers.pkl`.
+Result: 16-column `dataset_normalized.csv` + `scalers.pkl`. `Load` is deliberately dropped — the env
+observes it relative to the configured site peak (`load_kw / peak_kw`), so any load scale is in-distribution.
 
 Run standalone: `python normalize.py --input dataset_final.csv --output dataset_normalized.csv --scalers models/scalers.pkl`
 
@@ -255,13 +272,18 @@ cd /home/denys/PycharmProjects/ds_demo/ds_project_demo && .venv/bin/python envir
 
 ### Key design decisions
 
-**Domain randomization** via `RandomConfigWrapper`: on every `reset()` a new correlated hardware config is sampled:
+**Domain randomization** via `RandomConfigWrapper`: on every `reset()` the wrapper samples the site's
+consumption FIRST, then sizes hardware around it (load-first correlated sampling — keeps combos realistic),
+and generates a fresh full-split load series via `load_profiles.generate_series()` (~2 ms/reset):
 ```
-capacity  = uniform(50, 250) kWh
-solar     = capacity × uniform(0.8, 2.0) kWp
-inverter  = solar × uniform(0.8, 1.1) kW
-grid      = inverter × uniform(1.0, 1.5) kW   ← always ≥ inverter
-charge/discharge power = capacity / 2          ← C/2 rate
+profile   = choice('office', 'two_shift', 'flat')
+peak_load = uniform(10, 150) kW
+capacity  = peak_load × uniform(1.5, 5.0) kWh          ← 1.5–5 h of peak load
+solar     = peak_load × uniform(0.6, 2.5) kWp
+inverter  = max(solar × uniform(0.8, 1.1),
+                peak_load × uniform(1.1, 1.4)) kW      ← headroom over load noise/spikes AND solar
+grid      = inverter × uniform(1.0, 1.5) kW            ← always ≥ inverter ⇒ min(inv, grid) ≥ 1.1 × peak
+charge/discharge power = capacity / 2                   ← C/2 rate
 ```
 Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is no `price_to_buy` config field.
 
@@ -271,7 +293,7 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 
 **SyncNormalizeEvalCallback**: before each eval run, deep-copies `train_env.obs_rms` → `eval_env.obs_rms` so both use the same running stats.
 
-**Eval env**: fixed `DEFAULT_SYSTEM_CONFIG` (150 kWh mid-range) for stable training progress tracking.
+**Eval env**: fixed `DEFAULT_SYSTEM_CONFIG` (150 kWh mid-range, office/60 kW load from the dataset's original `Load` column) for stable training progress tracking.
 
 **Day-aligned episodes**: `_n_starts = len(df) // episode_len`; `episode_start = day_idx * episode_len`. Prevents mid-day slice training.
 
@@ -373,10 +395,26 @@ Rule-based inverter dispatch with no price awareness — reacts only to solar ir
 ### `data_combiner.py`
 
 ```python
-combine(config_id, tilt=None, azimuth=None) → pd.DataFrame  # 96 rows × 25 cols
+combine(config_id, tilt=None, azimuth=None, load_peak_kw=None, load_profile=None) → pd.DataFrame  # 96 rows × 25 cols
 ```
 
 Returns `None` if DAM fetch fails. Always check for None before passing to inference. No SQLite cache — uses plain `requests.Session()`.
+
+When load params are omitted, `get_load_parameters(config_id)` reads `settings['load']` from the DB
+(fallback `(60.0, 'office')` if the DB is down or the config predates the load section).
+
+### `load_profiles.py` — consumption archetypes
+
+`fetch_load(today, peak_kw=60.0, profile='office')` delegates to `load_profiles.generate_day()`
+(deterministic per date, same seeding as the legacy generator — office/60 output is bit-for-bit identical).
+
+| Profile | Shape (fraction of peak) | Weekend | Noise |
+|---|---|---|---|
+| `office` | 0.33 night, ramp 06–08, 1.0 plateau 08–18, ramp 18–20 + 1–2 midday spikes | ×0.45 | ±12% |
+| `two_shift` | 0.35 overnight, 1.0 plateau 06–22 | ×0.75 | ±10% |
+| `flat` | 1.0 constant 24/7 | ×1.0 | ±5% |
+
+The profile enum is designed so an external classifier can later pick a profile from real usage data.
 
 ### `synthetic_grid.py` — Monthly outage averages (h/day)
 
@@ -444,6 +482,7 @@ SiteConfig.to_env_dict() → {
     'solar':   { peak_power, efficiency },
     'inverter':{ max_power },
     'grid':    { capacity },
+    'load':    { peak_kw, profile },   # from LoadProfile sub-model; defaults office/60 for old stored configs
 }
 ```
 Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — no `price_to_buy` field.
@@ -504,7 +543,7 @@ All fetch calls with JWT handling. Token stored in `localStorage` under key `ems
 |---|---|
 | `Login` | Login + Register tabs. POST `/auth/login` (form-urlencoded) → stores token |
 | `Sidebar` | 4 mode tabs (SAC / Default / Порівняти / Історія), config/strategy dropdowns, initial SoC input, run button, CSV upload, Settings button, logout |
-| `SettingsModal` | Modal with 2 tabs: create/update system config (battery, inverter, solar, grid) and create/update strategy. Calls `POST /config/` and `POST /strategy/`. Refreshes dropdowns on save. |
+| `SettingsModal` | Modal with 2 tabs: create/update system config (battery, inverter, solar, grid, load: peak kW + profile select) and create/update strategy. Calls `POST /config/` and `POST /strategy/`. Refreshes dropdowns on save. |
 | `Kpis` | 5 KPI cards: cash flow, economic savings vs grid-only, sold/bought kWh, solar generation, unmet load |
 | `Charts` | SoC area chart (full width), Solar area chart, Grid bar chart (green=sell / red=buy) |
 | `FlowCharts` | Stacked area: "where solar goes" (→load / →battery / →grid / curtailed) + "load coverage" (solar / battery / grid / unmet) |
@@ -567,6 +606,7 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 | 33 | `backend/models/site.py`, `prediction_service.py` | ✅ Fixed | `reward_price_timing`, `reward_solar_priority`, `reward_eod_soc` columns added to `AgentPredictions` ORM and stored in `_build_rows()`. **Existing DBs need:** `ALTER TABLE predictions ADD COLUMN reward_price_timing FLOAT; ALTER TABLE predictions ADD COLUMN reward_solar_priority FLOAT; ALTER TABLE predictions ADD COLUMN reward_eod_soc FLOAT;` |
 | 34 | `environment/inference.py` | ✅ Fixed | `reward_eod_soc` was missing from the dispatch plan step dict; now captured from `info['reward_eod_soc']`. |
 | 35 | `run_live.py` | ✅ Fixed | Typo `"envoriment"` → `"environment"` in `os.chdir()` and model paths (×3). Also fixed `system_config['grid']` key `grid_capacity` → `capacity` and removed nonexistent `price_to_buy` field that would have caused a `KeyError` in the environment. |
+| 36 | branch `feature/configurable-load` | ⚠️ **Retrain required** | Load is now per-site configurable (`load.peak_kw` 10–150 kW + `load.profile` office/two_shift/flat) and domain-randomized in training with load-first correlated hardware sampling. Observations use relative load (`load_kw / peak_kw`) + 2 hardware-context scalars → obs 163→165. **Old `best_model.zip`/`obs_rms.pkl` are incompatible (loud shape error); `GET /predictions/` and `backtest_sac.py` fail cleanly until retrain.** `backtest_default.py` verified: dispatch identical to pre-change run for office/60. |
 
 ---
 
