@@ -11,7 +11,6 @@ LOG_THEN_STANDARD_COLS = [
     'DAM_Price',
 ]
 STANDARD_COLS = [
-    'Load',
     'Temperature_2m',
     'Shortwave_radiation',
     'DAM_Vol_Buy',
@@ -31,6 +30,7 @@ PASSTHROUGH_COLS = [
 ]
 DROP_COLS = [
     'timestamp',
+    'Load',      # not normalized: env observes load relative to configured peak_kw
     'Hour',
     'Minute',
     'Minute_sin',

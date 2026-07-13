@@ -11,7 +11,10 @@ class Environment(gym.Env):
     LOAD_LOOKAHEAD  = 16
     GTI_LOOKAHEAD   = 16
 
-    def __init__(self, df_raw: pd.DataFrame, df: pd.DataFrame, system_config: dict, episode_len: int = 96):
+    DEFAULT_LOAD_CONFIG = {'peak_kw': 60.0, 'profile': 'office'}
+
+    def __init__(self, df_raw: pd.DataFrame, df: pd.DataFrame, system_config: dict, episode_len: int = 96,
+                 load_kw: np.ndarray | None = None):
         super().__init__()
 
         self.df = df
@@ -43,6 +46,14 @@ class Environment(gym.Env):
 
         self.panel_area_m2        = self.solar_peak_power_kw / self.solar_efficiency
 
+        load_cfg = system_config.get('load') or self.DEFAULT_LOAD_CONFIG
+        self.load_peak_kw = float(load_cfg['peak_kw'])
+        self.load_kw = np.asarray(load_kw if load_kw is not None else df_raw['Load'].values, dtype=np.float64)
+        assert len(self.load_kw) == len(df_raw) == len(df), "load_kw must align with df/df_raw rows"
+        self.rel_load = (self.load_kw / self.load_peak_kw).astype(np.float32)
+        self._load_cap_ratio  = self.load_peak_kw / self.max_batt_capacity
+        self._load_grid_ratio = self.load_peak_kw / self.max_grid_capacity
+
         self.soc            = 0.0
         self.curr_step      = 0
         self.episode_start  = 0
@@ -51,7 +62,17 @@ class Environment(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         n_features = df.shape[1]
-        obs_size = n_features + 1 + self.PRICE_LOOKAHEAD + self.PRICE_HISTORY + self.LOAD_LOOKAHEAD + self.GTI_LOOKAHEAD + 1
+        # Observation layout (165 with the 16-col normalized df):
+        #   [0:16]    normalized feature row (Load column removed from df)
+        #   [16]      current relative load = load_kw / peak_kw
+        #   [17]      SoC
+        #   [18:114]  DAM_Price lookahead (96)
+        #   [114:130] DAM_Price history (16)
+        #   [130:146] relative-load lookahead (16)
+        #   [146:162] GTI lookahead (16)
+        #   [162]     tomorrow-solar mean GTI
+        #   [163:165] load_cap_ratio, load_grid_ratio (constant per episode)
+        obs_size = n_features + 2 + self.PRICE_LOOKAHEAD + self.PRICE_HISTORY + self.LOAD_LOOKAHEAD + self.GTI_LOOKAHEAD + 1 + 2
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
 
     def _calc_solar_generation_ts(self, gti_w_m2: float) -> float:
@@ -80,14 +101,14 @@ class Environment(gym.Env):
     def get_observe(self) -> np.ndarray:
         idx = min(self.curr_step, len(self.df) - 1)
         row = self.df.iloc[idx]
-        base = np.append(row.values, self.soc)
+        base = np.append(row.values, [self.rel_load[idx], self.soc])
 
         price_fwd = np.zeros(self.PRICE_LOOKAHEAD, dtype=np.float32)
         load_vec  = np.zeros(self.LOAD_LOOKAHEAD,  dtype=np.float32)
         gti_vec   = np.zeros(self.GTI_LOOKAHEAD,   dtype=np.float32)
 
         p = self.df['DAM_Price'].iloc[idx:idx + self.PRICE_LOOKAHEAD].values
-        l = self.df['Load'].iloc[idx:idx + self.LOAD_LOOKAHEAD].values
+        l = self.rel_load[idx:idx + self.LOAD_LOOKAHEAD]
         g = self.df['Global_tilted_irradiance_instant'].iloc[idx:idx + self.GTI_LOOKAHEAD].values
 
         price_fwd[:len(p)] = p
@@ -101,8 +122,9 @@ class Environment(gym.Env):
 
         next_gti = self.df['Global_tilted_irradiance_instant'].iloc[idx:idx + 96].values
         tomorrow_solar = np.array([next_gti.mean() if len(next_gti) > 0 else 0.0], dtype=np.float32)
+        hw_context = np.array([self._load_cap_ratio, self._load_grid_ratio], dtype=np.float32)
 
-        return np.concatenate([base, price_fwd, price_hist, load_vec, gti_vec, tomorrow_solar]).astype(np.float32)
+        return np.concatenate([base, price_fwd, price_hist, load_vec, gti_vec, tomorrow_solar, hw_context]).astype(np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -118,8 +140,8 @@ class Environment(gym.Env):
 
         curr_price         = row['DAM_Price'] / 1000
         buy_price          = curr_price + 3.0
-        curr_load_ts       = row['Load'] / 4
-        curr_load_kw       = row['Load']
+        curr_load_kw       = float(self.load_kw[self.curr_step])
+        curr_load_ts       = curr_load_kw / 4
         grid_status        = int(row['Grid'])
         gti                = row['Global_tilted_irradiance_instant']
         hours_until_outage = row['hours_until_outage']
