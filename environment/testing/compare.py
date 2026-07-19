@@ -40,6 +40,7 @@ def main():
         ('Solar generated (kWh)',      'solar_kwh',            None),
         ('Grid bought (kWh)',          'bought_kwh',           False),
         ('Grid sold (kWh)',            'sold_kwh',             True),
+        ('Curtailed solar (kWh)',      'curtailed_kwh',        False),
         ('Unmet load (kWh)',           'unmet_load_kwh',       False),
         ('LCOS cost (UAH)',            'lcos_total_uah',       False),
     ]

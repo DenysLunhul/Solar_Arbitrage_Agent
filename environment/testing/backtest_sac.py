@@ -103,7 +103,7 @@ def run(
 
     sum_cols = ['date', 'initial_soc', 'final_soc', 'total_money_earned',
                 'economic_savings_uah', 'total_reward_uah', 'solar_kwh',
-                'bought_kwh', 'sold_kwh', 'unmet_load_kwh', 'lcos_total_uah', 'steps']
+                'bought_kwh', 'sold_kwh', 'curtailed_kwh', 'unmet_load_kwh', 'lcos_total_uah', 'steps']
     summary_df = summary_df[[c for c in sum_cols if c in summary_df.columns]]
 
     return dispatch_df, summary_df
@@ -133,14 +133,23 @@ if __name__ == '__main__':
     print("\n" + "=" * 60)
     print("SAC — OVERALL RESULTS (365 days)")
     print("=" * 60)
+    n_days = len(summary_df)
+    lcos_uah = summary_df['lcos_total_uah'].sum()
+    capacity  = EVAL_SYSTEM_CONFIG['battery']['capacity_kwh']
+    lcos_per_kwh = EVAL_SYSTEM_CONFIG['battery']['lcos']
+    cycles_per_day = (lcos_uah / lcos_per_kwh) / capacity / n_days if n_days > 0 else 0.0
+
     print(f"  Grid cash flow:    {summary_df['total_money_earned'].sum():>12.2f} UAH  (sell - buy)")
     if 'economic_savings_uah' in summary_df.columns:
         print(f"  Economic savings:  {summary_df['economic_savings_uah'].sum():>12.2f} UAH  (vs grid-only baseline)")
     print(f"  Solar generated:   {summary_df['solar_kwh'].sum():>12.1f} kWh")
     print(f"  Grid bought:       {summary_df['bought_kwh'].sum():>12.1f} kWh")
     print(f"  Grid sold:         {summary_df['sold_kwh'].sum():>12.1f} kWh")
+    if 'curtailed_kwh' in summary_df.columns:
+        print(f"  Curtailed solar:   {summary_df['curtailed_kwh'].sum():>12.1f} kWh")
     print(f"  Unmet load:        {summary_df['unmet_load_kwh'].sum():>12.3f} kWh")
-    print(f"  LCOS cost:         {summary_df['lcos_total_uah'].sum():>12.2f} UAH")
+    print(f"  LCOS cost:         {lcos_uah:>12.2f} UAH")
+    print(f"  Cycles/day:        {cycles_per_day:>12.3f}")
     print(f"  Avg daily earned:  {summary_df['total_money_earned'].mean():>12.2f} UAH")
     print(f"\nDispatch → {RESULTS_DIR / 'sac_dispatch.csv'}")
     print(f"Summary  → {RESULTS_DIR / 'sac_summary.csv'}")

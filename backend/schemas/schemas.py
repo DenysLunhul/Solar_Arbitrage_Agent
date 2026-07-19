@@ -28,7 +28,9 @@ class Grid(BaseModel):
 
 
 class LoadProfile(BaseModel):
-    load_peak_kw: float = Field(default=60.0, gt=0, le=1000)
+    # bounds mirror the training domain-randomization envelope (10-150 kW) —
+    # configs outside it would silently run the model out of distribution
+    load_peak_kw: float = Field(default=60.0, ge=10, le=150)
     load_profile: Literal['office', 'two_shift', 'flat'] = Field(default='office')
 
 

@@ -131,15 +131,16 @@ def _build_response(result: dict, df_raw: pd.DataFrame) -> dict:
         })
     raw = result["summary"]
     summary = {
-        "total_money_earned": raw["total_money_earned"],
-        "bought_kwh":         raw["bought_kwh"],
-        "sold_kwh":           raw["sold_kwh"],
-        "solar_kwh":          raw["solar_kwh"],
-        "unmet_load_kwh":     raw["unmet_load_kwh"],
-        "lcos_total_uah":     raw["lcos_total_uah"],
-        "initial_soc":        raw["initial_soc"],
-        "final_soc":          raw["final_soc"],
-        "steps":              raw["steps"],
+        "total_money_earned":   raw["total_money_earned"],
+        "economic_savings_uah": raw.get("economic_savings_uah"),
+        "bought_kwh":           raw["bought_kwh"],
+        "sold_kwh":             raw["sold_kwh"],
+        "solar_kwh":            raw["solar_kwh"],
+        "unmet_load_kwh":       raw["unmet_load_kwh"],
+        "lcos_total_uah":       raw["lcos_total_uah"],
+        "initial_soc":          raw["initial_soc"],
+        "final_soc":            raw["final_soc"],
+        "steps":                raw["steps"],
     }
     return {
         "summary": summary,

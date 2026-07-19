@@ -40,6 +40,20 @@ DROP_COLS = [
     'Month',
 ]
 
+# Canonical output column order — the exact order the model was trained on.
+# Both normalize_dataset and normalize_row MUST emit this order: the observation
+# feeds row.values positionally into the network, and live data sources
+# (combined.csv) don't share the training CSV's column order.
+NORMALIZED_COLS = [
+    'Hour_sin', 'Hour_cos',
+    'Day_of_week_sin', 'Day_of_week_cos',
+    'Day_sin', 'Day_cos',
+    'Grid',
+    'next_outage_duration', 'outage_remaining_h', 'hours_until_outage',
+    'Temperature_2m', 'Shortwave_radiation', 'Global_tilted_irradiance_instant',
+    'DAM_Price', 'DAM_Vol_Buy', 'DAM_Vol_Sale',
+]
+
 
 def normalize_dataset(input_path: str, output_path: str, scalers_path: str):
     """Normalize the full dataset and save the normalized CSV + scalers.pkl."""
@@ -79,6 +93,13 @@ def normalize_dataset(input_path: str, output_path: str, scalers_path: str):
         if col in df.columns:
             scalers[col] = {'type': 'passthrough'}
             print(f"      {col:45s} passthrough")
+    missing = [c for c in NORMALIZED_COLS if c not in df.columns]
+    extra   = [c for c in df.columns if c not in NORMALIZED_COLS]
+    if missing:
+        print(f"      WARNING: canonical columns missing from input: {missing}")
+    if extra:
+        print(f"      WARNING: unexpected columns dropped from output: {extra}")
+    df = df[[c for c in NORMALIZED_COLS if c in df.columns]]
     nan_count = df.isna().sum().sum()
     print(f"\n      Final shape: {df.shape[0]} × {df.shape[1]}")
     print(f"      NaN after normalisation: {nan_count}")
@@ -98,7 +119,12 @@ def normalize_dataset(input_path: str, output_path: str, scalers_path: str):
 
 
 def normalize_row(row: pd.Series, scalers: dict) -> pd.Series:
-    """Normalize a single raw row using the same scalers fitted on training data."""
+    """Normalize a single raw row using the same scalers fitted on training data.
+
+    Always returns columns in the canonical NORMALIZED_COLS order — live data
+    sources don't share the training CSV's column order, and the observation
+    consumes row.values positionally.
+    """
     row = row.copy()
     cols_to_drop = [c for c in DROP_COLS if c in row.index]
     row = row.drop(index=cols_to_drop)
@@ -113,7 +139,10 @@ def normalize_row(row: pd.Series, scalers: dict) -> pd.Series:
             row[col] = info['scaler'].transform([[float(row[col])]])[0][0]
         elif t == 'minmax':
             row[col] = info['scaler'].transform([[float(row[col])]])[0][0]
-    return row
+    missing = [c for c in NORMALIZED_COLS if c not in row.index]
+    if missing:
+        raise ValueError(f"normalize_row: input row is missing canonical columns {missing}")
+    return row.reindex(NORMALIZED_COLS)
 
 
 if __name__ == '__main__':

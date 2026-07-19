@@ -1,17 +1,22 @@
+import argparse
 import copy
+import glob
 import os
 import pickle
+import re
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import gymnasium as gym
+import torch
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # project root appended (not prepended) so `environment` still resolves to
 # environment.py in this directory rather than the environment/ package
@@ -44,10 +49,14 @@ CONFIG = {
     'n_envs':          32,
 
     'sac_params': {
-        'device':          'cuda',
+        'device':          'cuda' if torch.cuda.is_available() else 'cpu',
         'buffer_size':     2_000_000,
         'learning_starts': 50_000,
         'batch_size':      512,
+        # 32 gradient updates per collected 32-env step = 1.0 update-to-data ratio
+        # (canonical SAC). Keeps the GPU busy instead of idling at the old 1/32 ratio;
+        # set back to 1 to restore the low-ratio behavior of pre-2026-07 runs.
+        'gradient_steps':  32,
         'learning_rate':   lr_schedule,
         'gamma':           0.99,
         'tau':             0.002,
@@ -151,7 +160,9 @@ def load_data():
     train_idx, eval_idx = [], []
     for month in range(1, 13):
         idx = df_raw.index[df_raw['Month'] == month].tolist()
-        split = int(len(idx) * 0.75)
+        # round the split point down to a full day so day-aligned episodes never straddle the boundary
+        split = (int(len(idx) * 0.75) // 96) * 96
+        assert split > 0, f"Month {month} has only {len(idx)} rows — too few for a day-aligned 75/25 split"
         train_idx.extend(idx[:split])
         eval_idx.extend(idx[split:])
 
@@ -181,9 +192,21 @@ def make_envs(df_train, df_train_raw, df_eval, df_eval_raw):
 
     train_env = DummyVecEnv([make_train_env(i) for i in range(n)])
 
+    # Eval load comes from the SAME generator as training and the live pipeline
+    # (load_profiles), seeded once so every evaluation sees the identical series.
+    # The dataset's Load column is a legacy shape (temp_scripts/change_load.py) kept
+    # only as the fixed backtest benchmark — using it here would select checkpoints
+    # on a distribution that matches neither training nor production.
+    eval_load = generate_series(
+        DEFAULT_SYSTEM_CONFIG['load']['profile'], DEFAULT_SYSTEM_CONFIG['load']['peak_kw'],
+        df_eval_raw['Hour'].values, df_eval_raw['Minute'].values,
+        df_eval_raw['Day_of_week'].values, np.random.default_rng(4242),
+    )
+
     eval_env = DummyVecEnv([
         lambda: Monitor(
-            Environment(df_raw=df_eval_raw, df=df_eval, system_config=DEFAULT_SYSTEM_CONFIG, episode_len=96),
+            Environment(df_raw=df_eval_raw, df=df_eval, system_config=DEFAULT_SYSTEM_CONFIG,
+                        episode_len=96, load_kw=eval_load),
             filename=os.path.join(CONFIG['monitor_dir'], 'eval')
         )
     ])
@@ -214,29 +237,109 @@ def make_model(train_env):
 
     return model
 
-class StatsCallback(BaseCallback):
-    """Prints one summary line to stdout every `log_every` env steps."""
+class RichProgressCallback(BaseCallback):
+    """Live terminal dashboard: percentage bar, steps/s, ETA, reward, entropy,
+    losses, buffer fill and eval scores — all in the terminal that launched
+    training. Falls back to plain flushed prints when stdout is not a TTY
+    (nohup / log-file runs), so those still show progress lines.
+    """
 
-    def __init__(self, log_every: int = 100_000):
+    def __init__(self, total_timesteps: int, eval_cb: EvalCallback,
+                 refresh_seconds: float = 1.0, plain_log_every: int = 100_000):
         super().__init__(verbose=0)
-        self.log_every  = log_every
-        self._last_log  = 0
+        self._total          = total_timesteps
+        self._eval_cb        = eval_cb
+        self._refresh        = refresh_seconds
+        self._plain_every    = plain_log_every
+        self._last_render    = 0.0
+        self._plain_next     = 0
+        self._n_evals_seen   = 0
+        self._progress       = None
+        self._task           = None
+        self._is_tty         = sys.stdout.isatty()
+
+    def _metrics_text(self) -> str:
+        vals = self.model.logger.name_to_value
+        buf  = self.model.ep_info_buffer
+        parts = []
+        if buf:
+            parts.append(f"rew {np.mean([e['r'] for e in buf]):9.2f}")
+        else:
+            parts.append("collecting…")
+        ent = vals.get('train/ent_coef')
+        if ent is not None:
+            parts.append(f"ent {ent:.4f}")
+        aloss = vals.get('train/actor_loss')
+        closs = vals.get('train/critic_loss')
+        if aloss is not None:
+            parts.append(f"actor {aloss:8.2f}")
+        if closs is not None:
+            parts.append(f"critic {closs:8.2f}")
+        fill = self.model.replay_buffer.size() / self.model.replay_buffer.buffer_size
+        parts.append(f"buf {fill:4.0%}")
+        if self._eval_cb.evaluations_results:
+            parts.append(f"eval {self._eval_cb.last_mean_reward:9.2f} "
+                         f"(best {self._eval_cb.best_mean_reward:9.2f})")
+        return " │ ".join(parts)
+
+    def _on_training_start(self) -> None:
+        if not self._is_tty:
+            print(f"stdout is not a TTY — plain progress lines every "
+                  f"{self._plain_every:,} steps", flush=True)
+            return
+        from rich.progress import (Progress, BarColumn, TaskProgressColumn,
+                                   MofNCompleteColumn, TimeElapsedColumn,
+                                   TimeRemainingColumn, TextColumn)
+        self._progress = Progress(
+            TextColumn("[bold blue]SAC"),
+            BarColumn(bar_width=30),
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
+            TextColumn("•"),
+            TimeElapsedColumn(),
+            TextColumn("ETA"),
+            TimeRemainingColumn(),
+            TextColumn("{task.fields[metrics]}"),
+            refresh_per_second=4,
+        )
+        self._progress.start()
+        self._task = self._progress.add_task(
+            "train", total=self._total,
+            completed=self.model.num_timesteps, metrics="warming up…",
+        )
 
     def _on_step(self) -> bool:
-        if self.num_timesteps - self._last_log >= self.log_every:
-            buf = self.model.ep_info_buffer
-            if buf:
-                mean_rew = np.mean([e['r'] for e in buf])
-                mean_len = np.mean([e['l'] for e in buf])
-                print(
-                    f"step {self.num_timesteps:>9,} | "
-                    f"ep_rew_mean {mean_rew:>10.2f} | "
-                    f"ep_len_mean {mean_len:>5.0f}"
+        now = time.monotonic()
+        if self._is_tty:
+            if now - self._last_render >= self._refresh:
+                self._last_render = now
+                self._progress.update(self._task, completed=self.model.num_timesteps,
+                                      metrics=self._metrics_text())
+            n_evals = len(self._eval_cb.evaluations_results)
+            if n_evals > self._n_evals_seen:
+                self._n_evals_seen = n_evals
+                self._progress.console.print(
+                    f"[green]eval[/green] @ {self.model.num_timesteps:>11,} steps: "
+                    f"mean reward {self._eval_cb.last_mean_reward:9.2f} "
+                    f"(best {self._eval_cb.best_mean_reward:9.2f})"
                 )
-            else:
-                print(f"step {self.num_timesteps:>9,} | collecting...")
-            self._last_log = self.num_timesteps
+        else:
+            if self.model.num_timesteps >= self._plain_next:
+                self._plain_next = self.model.num_timesteps + self._plain_every
+                pct = 100.0 * self.model.num_timesteps / self._total
+                print(f"{pct:5.1f}% | step {self.model.num_timesteps:>11,} | "
+                      f"{self._metrics_text()}", flush=True)
         return True
+
+    def _on_training_end(self) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._progress is not None:
+            self._progress.update(self._task, completed=self.model.num_timesteps,
+                                  metrics=self._metrics_text())
+            self._progress.stop()
+            self._progress = None
 
 class SyncNormalizeEvalCallback(EvalCallback):
     """EvalCallback that copies obs_rms from train_env → eval_env before each evaluation,
@@ -263,6 +366,76 @@ class SyncNormalizeEvalCallback(EvalCallback):
                 pickle.dump(self._train_env.obs_rms, f)
         return result
 
+class CheckpointAndNormalizeCallback(BaseCallback):
+    """Saves model + obs_rms together every `save_freq` env steps.
+
+    Unlike the stock CheckpointCallback, this pairs each model .zip with an
+    obs_rms.pkl so --resume can restore normalisation stats exactly.
+    """
+
+    def __init__(self, train_env: VecNormalize, save_freq: int, save_path: str,
+                 name_prefix: str = 'sac_ems', verbose: int = 1):
+        super().__init__(verbose)
+        self._train_env   = train_env
+        self._save_freq   = save_freq
+        self._save_path   = save_path
+        self._name_prefix = name_prefix
+        self._next_save   = save_freq
+        os.makedirs(save_path, exist_ok=True)
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps >= self._next_save:
+            stem = os.path.join(
+                self._save_path,
+                f'{self._name_prefix}_{self.num_timesteps}_steps',
+            )
+            self.model.save(stem)
+            with open(stem + '_obs_rms.pkl', 'wb') as f:
+                pickle.dump(self._train_env.obs_rms, f)
+            if self.verbose:
+                print(f'Checkpoint saved: {stem}.zip + obs_rms.pkl')
+            self._next_save += self._save_freq
+        return True
+
+
+def _checkpoint_step(path: str) -> int:
+    m = re.search(r'_(\d+)_steps\.zip$', path)
+    return int(m.group(1)) if m else 0
+
+
+def load_checkpoint(checkpoint_dir: str, train_env: VecNormalize, eval_env: VecNormalize):
+    """Find the latest checkpoint, load weights + obs_rms. Returns model or None."""
+    files = glob.glob(os.path.join(checkpoint_dir, 'sac_ems_*_steps.zip'))
+    if not files:
+        print('No checkpoints found — starting fresh.')
+        return None
+
+    latest = max(files, key=_checkpoint_step)
+    steps  = _checkpoint_step(latest)
+    print(f'Resuming from step {steps:,}: {latest}')
+
+    try:
+        model = SAC.load(latest, env=train_env, device=CONFIG['sac_params']['device'])
+    except ValueError as e:
+        raise SystemExit(
+            f"Checkpoint {latest} is incompatible with the current observation space "
+            f"{train_env.observation_space.shape} — it predates an env change. "
+            f"Move or delete models/checkpoints/ and start fresh.\nOriginal error: {e}"
+        )
+
+    obs_rms_path = latest.replace('.zip', '_obs_rms.pkl')
+    if os.path.exists(obs_rms_path):
+        with open(obs_rms_path, 'rb') as f:
+            obs_rms = pickle.load(f)
+        train_env.obs_rms = obs_rms
+        eval_env.obs_rms  = copy.deepcopy(obs_rms)
+        print('obs_rms restored from checkpoint.')
+    else:
+        print('No obs_rms paired with this checkpoint — normalisation will re-warm.')
+
+    return model
+
+
 def make_callbacks(train_env, eval_env):
     freq = max(CONFIG['eval_freq'] // CONFIG['n_envs'], 1)
 
@@ -275,26 +448,37 @@ def make_callbacks(train_env, eval_env):
         eval_freq=freq,
         n_eval_episodes=50,
         deterministic=True,
+        verbose=0,   # eval results are surfaced by the dashboard instead
+    )
+
+    checkpoint_cb = CheckpointAndNormalizeCallback(
+        train_env=train_env,
+        save_freq=2_000_000,
+        save_path=os.path.join('models', 'checkpoints'),
         verbose=1,
     )
 
-    stats_cb = StatsCallback(log_every=100_000)
+    dashboard = RichProgressCallback(
+        total_timesteps=CONFIG['total_timesteps'],
+        eval_cb=eval_cb,
+    )
 
-    return CallbackList([eval_cb, stats_cb])
+    return CallbackList([eval_cb, checkpoint_cb, dashboard]), dashboard
 
-def train(model, callbacks):
+def train(model, callbacks, reset_num_timesteps: bool = True):
     print("\n" + "="*60)
-    print("Training")
-    print(f"Steps: {CONFIG['total_timesteps']:,}")
+    print("Training" + (" (resumed)" if not reset_num_timesteps else ""))
+    print(f"Steps: {CONFIG['total_timesteps']:,}  |  device: {model.device}")
     print("Tensorboard: tensorboard --logdir logs/tensorboard/")
-    print("="*60 + "\n")
+    print("Ctrl-C saves a checkpoint you can continue from with --resume")
+    print("="*60 + "\n", flush=True)
 
     model.learn(
         total_timesteps=CONFIG['total_timesteps'],
         callback=callbacks,
         log_interval=CONFIG['log_interval'],
-        progress_bar=True,
-        reset_num_timesteps=True,
+        progress_bar=False,   # RichProgressCallback owns the terminal display
+        reset_num_timesteps=reset_num_timesteps,
     )
 
     return model
@@ -334,6 +518,11 @@ def save_and_test(model, eval_env):
     print(f"Earned:       {total_money_earned:.2f} UAH")
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from the latest checkpoint in models/checkpoints/')
+    args = parser.parse_args()
+
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     np.random.seed(42)
 
@@ -341,9 +530,28 @@ if __name__ == '__main__':
 
     train_env, eval_env = make_envs(d_train, d_train_raw, d_eval, d_eval_raw)
 
-    model = make_model(train_env)
-    callbacks = make_callbacks(train_env, eval_env)
-    model = train(model, callbacks)
+    if args.resume:
+        model = load_checkpoint('models/checkpoints', train_env, eval_env)
+        if model is None:
+            model = make_model(train_env)
+            args.resume = False
+    else:
+        model = make_model(train_env)
+
+    callbacks, dashboard = make_callbacks(train_env, eval_env)
+    try:
+        model = train(model, callbacks, reset_num_timesteps=not args.resume)
+    except KeyboardInterrupt:
+        dashboard.close()
+        steps = model.num_timesteps
+        stem = os.path.join('models', 'checkpoints', f'sac_ems_{steps}_steps')
+        os.makedirs(os.path.dirname(stem), exist_ok=True)
+        model.save(stem)
+        with open(stem + '_obs_rms.pkl', 'wb') as f:
+            pickle.dump(train_env.obs_rms, f)
+        print(f"\nInterrupted at {steps:,} steps — checkpoint saved: {stem}.zip")
+        print("Continue with: python train.py --resume")
+        sys.exit(0)
 
     save_and_test(model, eval_env)
 

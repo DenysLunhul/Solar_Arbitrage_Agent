@@ -1,0 +1,16 @@
+# GPU training image for the SAC EMS agent.
+# Never started by plain `docker compose up` — the train service is gated behind
+# the "train" profile. Launch explicitly:
+#   docker compose --profile train up train
+# Requires the NVIDIA Container Toolkit on the host for GPU access;
+# train.py falls back to CPU automatically if no GPU is visible.
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+
+WORKDIR /app
+
+COPY requirements_train.txt .
+RUN pip install --no-cache-dir -r requirements_train.txt
+
+# Code and datasets are volume-mounted at runtime (see docker-compose.yml) so
+# checkpoints, logs and the trained model land on the host and survive the container.
+CMD ["python", "environment/train.py"]

@@ -184,8 +184,9 @@ def _fetch_soc_from_db(min_reserve: float) -> tuple[float, str]:
         finally:
             db.close()
         if persisted is not None:
-            soc = max(float(persisted), min_reserve)
-            label = f"from DB (clamped to {soc:.3f})" if soc > persisted else "from DB"
+            persisted_f = float(persisted)
+            soc = max(persisted_f, min_reserve)
+            label = f"from DB ({persisted_f:.3f}, clamped to min_reserve {min_reserve:.3f})" if persisted_f < min_reserve else "from DB"
             return soc, label
     except Exception as e:
         print(f"DB unavailable ({e}) — using default SoC")

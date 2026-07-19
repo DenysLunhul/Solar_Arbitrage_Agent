@@ -101,7 +101,7 @@ def run(
 
     sum_cols = ['date', 'initial_soc', 'final_soc', 'total_money_earned',
                 'economic_savings_uah', 'solar_kwh', 'bought_kwh', 'sold_kwh',
-                'unmet_load_kwh', 'lcos_total_uah', 'steps']
+                'curtailed_kwh', 'unmet_load_kwh', 'lcos_total_uah', 'steps']
     summary_df = summary_df[[c for c in sum_cols if c in summary_df.columns]]
 
     return dispatch_df, summary_df

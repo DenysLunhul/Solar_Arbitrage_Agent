@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:16
@@ -22,9 +20,61 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # inside the compose network the DB host is the service name, not localhost
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # baked into the JS bundle at build time — point it at the API URL
+        # the BROWSER will use (not the internal compose hostname)
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:80"
+    depends_on:
+      - app
+
+  # ---- Training stack (never starts with plain `docker compose up`) ----
+  # Launch:  docker compose --profile train up train
+  # Resume:  docker compose --profile train run --rm train python environment/train.py --resume
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    profiles: ["train"]
+    volumes:
+      - ./environment:/app/environment
+      - ./data_providers:/app/data_providers
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Monitor training:  docker compose --profile train up -d tensorboard  →  http://localhost:6006
+  tensorboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    profiles: ["train"]
+    command: tensorboard --logdir environment/logs/tensorboard/ --host 0.0.0.0
+    ports:
+      - "6006:6006"
+    volumes:
+      - ./environment:/app/environment
 
 volumes:
   postgres_data:

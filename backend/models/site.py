@@ -57,6 +57,7 @@ class AgentPredictions(Base):
     solar_to_battery_kwh = Column(Float)
     solar_to_grid_kwh    = Column(Float)
     battery_to_load_kwh  = Column(Float)
+    battery_to_grid_kwh  = Column(Float)
     grid_to_load_kwh     = Column(Float)
     grid_to_battery_kwh  = Column(Float)
 

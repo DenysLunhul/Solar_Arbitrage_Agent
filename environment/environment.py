@@ -58,21 +58,33 @@ class Environment(gym.Env):
         self.curr_step      = 0
         self.episode_start  = 0
 
+        # Hardware context scalars: under domain randomization the agent cannot infer
+        # capacity / lcos / reserve floor / efficiency from the data stream alone.
+        self._hw_obs = np.array([
+            self.max_batt_capacity / 250.0,
+            self.lcos / 1.25,
+            self.soc_soft_min,
+            (self.batt_efficiency - 0.90) / 0.08,
+        ], dtype=np.float32)
+        self._day_avg_price = 0.0
+        self._tomorrow_solar_cached = np.zeros(1, dtype=np.float32)
+
         self._n_starts = max(1, len(df) // episode_len)
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         n_features = df.shape[1]
-        # Observation layout (165 with the 16-col normalized df):
+        # Observation layout (169 with the 16-col normalized df):
         #   [0:16]    normalized feature row (Load column removed from df)
         #   [16]      current relative load = load_kw / peak_kw
         #   [17]      SoC
-        #   [18:114]  DAM_Price lookahead (96)
-        #   [114:130] DAM_Price history (16)
-        #   [130:146] relative-load lookahead (16)
-        #   [146:162] GTI lookahead (16)
-        #   [162]     tomorrow-solar mean GTI
+        #   [18:114]  DAM_Price lookahead (96, zero-padded past episode end)
+        #   [114:130] DAM_Price history (16, zero-padded before episode start)
+        #   [130:146] relative-load lookahead (16, zero-padded past episode end)
+        #   [146:162] GTI lookahead (16, zero-padded past episode end)
+        #   [162]     tomorrow-solar mean GTI (next day's mean, cached at reset)
         #   [163:165] load_cap_ratio, load_grid_ratio (constant per episode)
-        obs_size = n_features + 2 + self.PRICE_LOOKAHEAD + self.PRICE_HISTORY + self.LOAD_LOOKAHEAD + self.GTI_LOOKAHEAD + 1 + 2
+        #   [165:169] capacity/250, lcos/1.25, soc_soft_min, (efficiency-0.90)/0.08
+        obs_size = n_features + 2 + self.PRICE_LOOKAHEAD + self.PRICE_HISTORY + self.LOAD_LOOKAHEAD + self.GTI_LOOKAHEAD + 1 + 2 + 4
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
 
     def _calc_solar_generation_ts(self, gti_w_m2: float) -> float:
@@ -82,15 +94,20 @@ class Environment(gym.Env):
 
     DEFAULT_SOC_TARGET = 0.30
 
-    def _calc_target_soc(self, next_outage_h: float, curr_load_kw: float, gti_w_m2: float) -> float:
+    def _calc_target_soc(self, next_outage_h: float, curr_load_kw: float, gti_w_m2: float,
+                         hours_until_outage: float = 0.0) -> float:
         """Dynamic target SoC: energy needed to survive the upcoming outage, clipped to [soc_soft_min, soc_soft_max]."""
         if next_outage_h <= 0:
             return self.DEFAULT_SOC_TARGET
 
-        energy_load  = curr_load_kw * next_outage_h
-        solar_per_hour = self._calc_solar_generation_ts(gti_w_m2) * 4
-        energy_solar   = solar_per_hour * next_outage_h
-        net_energy_needed  = max(0.0, energy_load - energy_solar)
+        energy_load = curr_load_kw * next_outage_h
+        # Only credit solar when the outage starts within 3 h — beyond that current GTI is not
+        # representative (midday GTI would underestimate the reserve needed for a night outage).
+        if hours_until_outage <= 3.0:
+            solar_per_hour    = self._calc_solar_generation_ts(gti_w_m2) * 4
+            net_energy_needed = max(0.0, energy_load - solar_per_hour * next_outage_h)
+        else:
+            net_energy_needed = energy_load
         energy_with_buffer = net_energy_needed * 1.10
         target_soc = energy_with_buffer / self.max_batt_capacity
         target_soc = max(target_soc, self.DEFAULT_SOC_TARGET)
@@ -107,24 +124,26 @@ class Environment(gym.Env):
         load_vec  = np.zeros(self.LOAD_LOOKAHEAD,  dtype=np.float32)
         gti_vec   = np.zeros(self.GTI_LOOKAHEAD,   dtype=np.float32)
 
-        p = self.df['DAM_Price'].iloc[idx:idx + self.PRICE_LOOKAHEAD].values
-        l = self.rel_load[idx:idx + self.LOAD_LOOKAHEAD]
-        g = self.df['Global_tilted_irradiance_instant'].iloc[idx:idx + self.GTI_LOOKAHEAD].values
+        # Lookaheads are clipped to the episode's day: at inference the df is exactly 96 rows
+        # and everything past the end is zero-padded — training must match that distribution.
+        ep_end = self.episode_start + self.episode_len
+        p = self.df['DAM_Price'].iloc[idx:min(idx + self.PRICE_LOOKAHEAD, ep_end)].values
+        l = self.rel_load[idx:min(idx + self.LOAD_LOOKAHEAD, ep_end)]
+        g = self.df['Global_tilted_irradiance_instant'].iloc[idx:min(idx + self.GTI_LOOKAHEAD, ep_end)].values
 
         price_fwd[:len(p)] = p
         load_vec[:len(l)]  = l
         gti_vec[:len(g)]   = g
 
         price_hist = np.zeros(self.PRICE_HISTORY, dtype=np.float32)
-        hist_start = max(0, idx - self.PRICE_HISTORY)
+        hist_start = max(self.episode_start, idx - self.PRICE_HISTORY)
         h = self.df['DAM_Price'].iloc[hist_start:idx].values
         price_hist[self.PRICE_HISTORY - len(h):] = h
 
-        next_gti = self.df['Global_tilted_irradiance_instant'].iloc[idx:idx + 96].values
-        tomorrow_solar = np.array([next_gti.mean() if len(next_gti) > 0 else 0.0], dtype=np.float32)
-        hw_context = np.array([self._load_cap_ratio, self._load_grid_ratio], dtype=np.float32)
+        load_context = np.array([self._load_cap_ratio, self._load_grid_ratio], dtype=np.float32)
 
-        return np.concatenate([base, price_fwd, price_hist, load_vec, gti_vec, tomorrow_solar, hw_context]).astype(np.float32)
+        return np.concatenate([base, price_fwd, price_hist, load_vec, gti_vec,
+                               self._tomorrow_solar_cached, load_context, self._hw_obs]).astype(np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -132,6 +151,16 @@ class Environment(gym.Env):
         day_idx            = int(np.random.randint(0, self._n_starts))
         self.episode_start = day_idx * self.episode_len
         self.curr_step     = self.episode_start
+
+        self._day_avg_price = float(
+            self.df_raw['DAM_Price'].iloc[self.episode_start:self.episode_start + self.episode_len].mean()
+        ) / 1000
+        tomorrow_start = self.episode_start + self.episode_len
+        next_day_gti   = self.df['Global_tilted_irradiance_instant'].iloc[tomorrow_start:tomorrow_start + self.episode_len].values
+        self._tomorrow_solar_cached = np.array(
+            [next_day_gti.mean() if len(next_day_gti) > 0 else 0.0], dtype=np.float32
+        )
+
         return self.get_observe(), {}
 
     def step(self, action):
@@ -148,11 +177,7 @@ class Environment(gym.Env):
         outage_remaining_h = row['outage_remaining_h']
         next_outage_h      = row['next_outage_duration']
 
-        day_start = (self.curr_step // 96) * 96
-        day_end   = min(day_start + 96, len(self.df_raw))
-        day_avg_price = float(self.df_raw['DAM_Price'].iloc[day_start:day_end].mean()) / 1000
-
-        target_soc = self._calc_target_soc(next_outage_h, curr_load_kw, gti)
+        target_soc = self._calc_target_soc(next_outage_h, curr_load_kw, gti, hours_until_outage)
 
         solar_gen_ts = self._calc_solar_generation_ts(gti)
 
@@ -179,6 +204,13 @@ class Environment(gym.Env):
                 energy_drawn_for_batt = solar_used_for_batt
                 actual_chem_in        = solar_used_for_batt * self.batt_efficiency
                 grid_needed_for_batt  = 0.0
+            else:
+                # Demand has first priority on grid capacity; cap battery's grid draw to what remains.
+                available_grid_for_batt = max(0.0, self.max_grid_capacity_ts - residual_demand_ts)
+                if grid_needed_for_batt > available_grid_for_batt:
+                    grid_needed_for_batt  = available_grid_for_batt
+                    energy_drawn_for_batt = solar_used_for_batt + grid_needed_for_batt
+                    actual_chem_in        = energy_drawn_for_batt * self.batt_efficiency
 
             self.soc = min(1.0, self.soc + actual_chem_in / self.max_batt_capacity)
 
@@ -215,7 +247,6 @@ class Environment(gym.Env):
             net_demand_after_batt = max(0.0, residual_demand_ts - batt_contribution_ts)
             batt_export_possible  = max(0.0, batt_contribution_ts - residual_demand_ts)
 
-        solar_export_possible = remaining_solar_surplus
         total_export_possible = remaining_solar_surplus + batt_export_possible
 
         grid_action   = float(action[1])
@@ -259,7 +290,7 @@ class Environment(gym.Env):
             money_earned_ts = -actual_grid_ts * buy_price
 
         lcos_cost = self.lcos * actual_batt_energy_abs
-        r_lcos    = -3.0 * lcos_cost
+        r_lcos    = -2.0 * lcos_cost
 
         if unmet_load > 0:
             r_unmet = -unmet_load * buy_price * 5
@@ -300,30 +331,42 @@ class Environment(gym.Env):
             r_waste         = -10.0 * self.lcos * wasted
 
         curtailed_kwh = 0.0
-        if grid_status == 1 and total_export_possible > 0.01:
+        if grid_status == 1:
             actually_exported = max(0.0, -actual_grid_ts)
+            # total curtailment for reporting (solar + battery surplus not exported)
             curtailed_kwh = max(0.0, total_export_possible - actually_exported)
-            if curtailed_kwh > 0.01:
-                r_curtail = -curtailed_kwh * curr_price * 3.0
+            # r_curtail only fires for SOLAR curtailment — r_waste already penalises wasted battery discharge
+            solar_curtailed = max(0.0, remaining_solar_surplus - actually_exported)
+            if solar_curtailed > 0.01:
+                r_curtail = -solar_curtailed * curr_price * 3.0
+        elif grid_status == 0 and remaining_solar_surplus > 0.01:
+            # during outage surplus solar is physically lost — track for reporting but don't penalise
+            curtailed_kwh = remaining_solar_surplus
 
         r_price_timing = 0.0
-        outage_imminent = grid_status == 1 and 0 < hours_until_outage <= 3.0 and self.soc < target_soc
+        outage_imminent = grid_status == 1 and 0 < hours_until_outage <= 6.0 and self.soc < target_soc
         if grid_status == 1 and not outage_imminent:
-            price_dev = curr_price - day_avg_price
+            price_dev = curr_price - self._day_avg_price
             if actual_grid_ts < 0:
-                r_price_timing =  price_dev * abs(actual_grid_ts) * 1.0
+                # don't penalise selling surplus SOLAR below average — curtailing is always worse.
+                # battery discharge keeps full price-timing signal so the agent learns sell-high timing.
+                if not (remaining_solar_surplus > 0.1 and price_dev < 0):
+                    r_price_timing = price_dev * abs(actual_grid_ts) * 1.0
             elif actual_grid_ts > 0:
                 r_price_timing = -price_dev * actual_grid_ts * 1.0
 
         if grid_status == 1 and grid_needed_for_batt > 0.01 and solar_gen_ts > 0.1 and not outage_imminent:
-            solar_fraction    = min(1.0, solar_gen_ts / (solar_gen_ts + grid_needed_for_batt))
-            r_solar_priority  = -grid_needed_for_batt * solar_fraction * curr_price * 4.0
+            solar_fraction = min(1.0, solar_gen_ts / (solar_gen_ts + grid_needed_for_batt))
+            # scale penalty continuously with soc/target — no hard cliff at target_soc
+            priority_scale = float(np.clip(self.soc / target_soc, 0.5, 1.0)) if target_soc > 0 else 1.0
+            r_solar_priority = -grid_needed_for_batt * solar_fraction * curr_price * 4.0 * priority_scale
 
         r_eod_soc = 0.0
         step_in_ep = self.curr_step - self.episode_start
         if step_in_ep == 95:
             soc_carried = max(0.0, self.soc - self.DEFAULT_SOC_TARGET)
-            r_eod_soc = soc_carried * self.max_batt_capacity * buy_price * 0.15
+            # use avg day buy price — midnight buy_price is artificially low and weakens the incentive
+            r_eod_soc = soc_carried * self.max_batt_capacity * (self._day_avg_price + 3.0) * 0.15
 
         reward = (r_market + r_lcos + r_unmet + r_mismatch + r_soc_soft + r_reserve + r_preparation + r_soc_target + r_waste + r_curtail + r_price_timing + r_solar_priority + r_eod_soc) / (self.max_batt_capacity / 100.0)
 

@@ -14,8 +14,11 @@ Build an autonomous RL agent that optimally manages energy flows in a hybrid nod
 
 ```
 ds_project_demo/
-├── docker-compose.yml
+├── docker-compose.yml                     # db + app + frontend; train/tensorboard under --profile train
+├── Dockerfile                             # backend API image (CPU torch)
+├── Dockerfile.train                       # GPU training image (pytorch/pytorch CUDA base)
 ├── requirements.txt
+├── requirements_train.txt                 # minimal deps for the training container / venv
 ├── .env                                   # DATABASE_URL, SECRET_KEY, ALGORITHM, ACCESS_EXPIRE_MINUTES
 ├── environment/                           # RL environment, training, inference, backtests
 │   ├── environment.py                     # Gymnasium RL environment (fully implemented)
@@ -28,6 +31,7 @@ ds_project_demo/
 │   ├── models/
 │   │   ├── sac_ems.zip                    # Final SAC model (last training run)
 │   │   ├── best/best_model.zip            # Best checkpoint by eval reward ← used by API
+│   │   ├── checkpoints/                   # periodic model+obs_rms pairs every 2M steps (for --resume)
 │   │   ├── scalers.pkl                    # sklearn scalers fitted on training data
 │   │   └── obs_rms.pkl                    # VecNormalize running stats (required for inference)
 │   ├── testing/
@@ -85,6 +89,8 @@ ds_project_demo/
 │       ├── main.jsx                       # React root mount
 │       ├── api.js                         # All API calls + JWT token management
 │       └── App.jsx                        # Full dashboard (login, charts, table, history)
+│   ├── Dockerfile                         # node build → nginx serve (VITE_API_URL build arg)
+│   └── nginx.conf                         # SPA fallback + asset caching
 ├── run_live.py                            # CLI: fetch tomorrow's data + run SAC inference (--soc --tilt --azimuth --load-peak --load-profile)
 └── temp/                                  # One-off data-cleaning utility scripts
 ```
@@ -123,16 +129,24 @@ LOAD_LOOKAHEAD  = 16  # steps of future Load appended to observation (4-hour hor
 GTI_LOOKAHEAD   = 16  # steps of future GTI appended to observation (4-hour horizon)
 
 action_space      = Box(low=-1.0, high=1.0, shape=(2,), dtype=float32)
-observation_space = Box(low=-inf, high=inf, shape=(165,), dtype=float32)
+observation_space = Box(low=-inf, high=inf, shape=(169,), dtype=float32)
 # 16 normalized feature cols (Load removed) + current relative load + SoC + 96 price fwd + 16 price hist
-# + 16 relative-load lookahead + 16 GTI + 1 tomorrow solar + load_cap_ratio + load_grid_ratio → shape (165,)
+# + 16 relative-load lookahead + 16 GTI + 1 tomorrow solar + load_cap_ratio + load_grid_ratio
+# + 4 hardware scalars (capacity/250, lcos/1.25, soc_soft_min, (efficiency−0.90)/0.08) → shape (169,)
 ```
 
 **Relative load**: load enters the observation as `load_kw / load.peak_kw` (site-scale invariant), not
-StandardScaler-normalized. Two per-episode context scalars close the layout: `load_cap_ratio = peak_kw /
-capacity_kwh` and `load_grid_ratio = peak_kw / max_grid_capacity` — needed so the agent can infer
-`target_soc ≈ load × outage_h / capacity` under domain-randomized load AND hardware. The 163→165 obs change
-deliberately breaks old model artifacts loudly (shape error) instead of silently mis-normalizing.
+StandardScaler-normalized. Two per-episode context scalars: `load_cap_ratio = peak_kw / capacity_kwh` and
+`load_grid_ratio = peak_kw / max_grid_capacity` — needed so the agent can infer
+`target_soc ≈ load × outage_h / capacity` under domain-randomized load AND hardware. Four more hardware
+scalars (capacity, lcos, soc_soft_min, efficiency — normalized) close the layout so the agent can also
+infer cycling cost and reserve floor under randomization. The 163→169 obs change deliberately breaks old
+model artifacts loudly (shape error) instead of silently mis-normalizing.
+
+**Episode-boundary clipping**: all lookaheads (price fwd, load, GTI) are clipped to the episode's day and
+zero-padded past it; price history is clipped to the episode start. At inference the df is exactly 96 rows,
+so training must see the same zero-padded distribution. **Tomorrow-solar** is the mean GTI of the NEXT day
+(cached at reset; 0.0 when there is no next day), not a rolling `idx:idx+96` window.
 
 | Action dim | Meaning |
 |---|---|
@@ -204,7 +218,7 @@ SoC is randomized uniformly on each reset: `self.soc = uniform(0.0, 1.0)`.
 
 ```
 r_market         = |grid_export| × (DAM_price/1000)  OR  grid_import × -(DAM_price/1000 + 3.0)
-r_lcos           = -(3.0 × lcos × |batt_energy_cycled|)
+r_lcos           = -(2.0 × lcos × |batt_energy_cycled|)
 r_unmet          = -(unmet_load × (DAM_price/1000 + 3.0) × 5)        # if unmet_load > 0
 r_mismatch       = 0.0                                                 # disabled (kept in info for compat)
 r_soc_soft       = -(50.0 × violation²)                               # outside [soc_min, 0.80]
@@ -213,17 +227,20 @@ r_reserve        = -(50.0 × soc_deficit × log1p(outage_remaining_h)) # during 
 r_preparation    = 20.0 × exp(-0.5 × hours_until_outage) × min(soc, target_soc)  # pre-outage (≤6 h)
 r_soc_target     = solar_chem_stored × buy_price                      # solar-sourced charging while soc < target_soc
 r_waste          = -(10.0 × lcos × wasted_kWh)                       # discharge exceeding demand + grid headroom
-r_curtail        = -(curtailed_kWh × curr_price × 3.0)               # solar surplus discarded, not stored or exported (grid up)
-r_solar_priority = -(grid_needed_for_batt × solar_fraction × curr_price × 4.0)  # grid charging while solar active (non-outage, load imports excluded)
-r_price_timing   = ±price_dev × |grid_kwh| × 1.0                    # bonus sell-high / penalty buy-high
-r_eod_soc        = max(0, soc - DEFAULT_SOC_TARGET) × capacity × buy_price × 0.15  # fired at step 95 only
+r_curtail        = -(solar_curtailed_kWh × curr_price × 3.0)         # SOLAR surplus discarded (grid up); battery waste is r_waste's job
+r_solar_priority = -(grid_needed_for_batt × solar_fraction × curr_price × 4.0 × priority_scale)  # priority_scale = clip(soc/target, 0.5, 1.0)
+r_price_timing   = ±price_dev × |grid_kwh| × 1.0                    # bonus sell-high / penalty buy-high; sell-side suppressed for surplus solar below day-avg
+r_eod_soc        = max(0, soc - DEFAULT_SOC_TARGET) × capacity × (day_avg_price + 3.0) × 0.15  # fired at step 95; day-avg buy price (midnight price too low)
 
 reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalized by capacity
 ```
 
 **Reward normalization**: dividing by `capacity / 100` keeps reward magnitude consistent across the domain-randomized hardware range (50–250 kWh), preventing large-battery configs from dominating the replay buffer.
 
-**r_lcos coefficient = 3.0**: raised to 3.0 (from 2.5) in issue #31. Each kWh cycled through a 150 kWh battery costs `3.0 × 1.15 / 1.5 = 2.30` in normalized reward — stronger deterrent against unnecessary cycling while still allowing profitable arbitrage.
+**r_lcos coefficient = 2.0**: model_14 — the best backtest to date (583k UAH savings, 0.917 cycles/day,
+~42k kWh curtailed) — trained at 2.0 on the June `randomized_load` branch; 3.0 (issue #31 / model_11)
+produced only 459k UAH. Adopted 2.0 during the branch reconciliation (issue #37). History: 1.2 → 1.4 →
+2.5 → 4.0 (overcorrected, #29) → 2.5 → 3.0 → **2.0**.
 
 **r_soc_soft below-target coefficient = 100.0**: raised from 25 to give a daily gap penalty of `-64` (normalized, 150 kWh battery, 10% below target over 96 steps) vs a single grid-charge step cost of `-90` — a margin of ~70% that SAC can reliably learn. At 25, the daily penalty was only `-16`, too weak to overcome charging cost.
 
@@ -235,13 +252,23 @@ reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalize
 
 **r_waste**: penalizes discharging more than demand + available grid export headroom can absorb.
 
-**r_curtail multiplier = 3.0×**: raised from 1.0× because the model was discarding ~10k kWh/year of solar surplus. Solar lost at the current step cannot be recovered at a better price later; the 3× multiplier ensures curtailment always costs more in reward than any `r_price_timing` gain from holding.
+**r_curtail multiplier = 3.0×**: raised from 1.0× because the model was discarding ~10k kWh/year of solar surplus. Solar lost at the current step cannot be recovered at a better price later; the 3× multiplier ensures curtailment always costs more in reward than any `r_price_timing` gain from holding. **Scope (issue #37)**: only SOLAR curtailment is penalized — unexported battery discharge is already r_waste's job. During outages, lost surplus solar is tracked in `curtailed_kwh` for reporting but not penalized (physically unavoidable).
 
-**r_solar_priority**: penalizes grid-sourced battery charging while solar is simultaneously active (> 0.1 kWh/step). Only fires when `grid_needed_for_batt > 0.01` — load-driven imports are excluded. Coefficient 4.0 × solar_fraction × curr_price × grid_needed_for_batt (raised from 2.0 in issue #31). Suppressed when outage is imminent (`hours_until_outage ≤ 3` and `soc < target_soc`). Backtest found 46.6% of all grid buying (69k kWh/year) happened during daylight, buying expensive grid power (8 UAH/kWh) while free solar was available.
+**r_solar_priority**: penalizes grid-sourced battery charging while solar is simultaneously active (> 0.1 kWh/step). Only fires when `grid_needed_for_batt > 0.01` — load-driven imports are excluded. Coefficient 4.0 × solar_fraction × curr_price × grid_needed_for_batt × `priority_scale` (= clip(soc/target_soc, 0.5, 1.0) — the penalty ramps in continuously instead of a hard cliff at target). Suppressed when outage is imminent (`hours_until_outage ≤ 6` and `soc < target_soc`). Backtest found 46.6% of all grid buying (69k kWh/year) happened during daylight, buying expensive grid power (8 UAH/kWh) while free solar was available.
+
+**`outage_imminent` window = 6h** (issue #37, was 3h): matches the r_preparation window so the buy-price
+penalty and solar-priority penalty never fight urgent pre-outage charging.
+
+**Demand-first grid priority** (issue #37): when charging from grid, the battery's grid draw is capped to
+`max_grid_capacity_ts − residual_demand_ts` — the battery can never starve the load of grid capacity.
+
+**target_soc solar credit gate** (issue #37): `_calc_target_soc` only subtracts expected solar generation
+when the outage starts within 3 h — beyond that, current GTI is not representative (midday GTI would
+underestimate the reserve needed for a night outage).
 
 ### `info` dict (returned by `step()`)
 
-`soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `battery_kwh` (+ = charging), `unmet_load_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`, `reward_curtail`, `reward_price_timing`, `reward_solar_priority`
+`soc`, `target_soc`, `reward`, `solar_gen_ts_kwh`, `solar_surplus_kwh`, `actual_grid_kwh`, `battery_kwh` (+ = charging), `unmet_load_kwh`, `curtailed_kwh`, `lcos_cost`, `mismatch`, `money_earned_ts`, `reward_market`, `reward_lcos`, `reward_unmet`, `reward_mismatch`, `reward_soc_soft`, `reward_reserve`, `reward_preparation`, `reward_soc_target`, `reward_waste`, `reward_curtail`, `reward_price_timing`, `reward_solar_priority`, `reward_eod_soc`
 
 ---
 
@@ -257,6 +284,11 @@ reward = sum(all components) / (battery_capacity_kwh / 100.0)        # normalize
 
 Result: 16-column `dataset_normalized.csv` + `scalers.pkl`. `Load` is deliberately dropped — the env
 observes it relative to the configured site peak (`load_kw / peak_kw`), so any load scale is in-distribution.
+
+**Canonical column order**: both `normalize_dataset` and `normalize_row` emit the exact `NORMALIZED_COLS`
+order (issue #38) — the observation consumes `row.values` positionally, and live data sources
+(`combined.csv`) don't share the training CSV's column order. `normalize_row` raises if a canonical
+column is missing.
 
 Run standalone: `python normalize.py --input dataset_final.csv --output dataset_normalized.csv --scalers models/scalers.pkl`
 
@@ -287,13 +319,20 @@ charge/discharge power = capacity / 2                   ← C/2 rate
 ```
 Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is no `price_to_buy` config field.
 
-**Per-month 75/25 split**: for each of the 12 months, first 75% of rows → train, last 25% → eval. All seasons represented in both sets. No seasonal bias.
+**Per-month 75/25 split**: for each of the 12 months, first 75% of rows → train, last 25% → eval — with the
+split point rounded down to a full day (multiple of 96) so day-aligned episodes never straddle a month
+boundary. All seasons represented in both sets. No seasonal bias.
 
 **VecNormalize**: obs normalized with `clip_obs=10.0`; reward normalized on train env, raw on eval env.
 
 **SyncNormalizeEvalCallback**: before each eval run, deep-copies `train_env.obs_rms` → `eval_env.obs_rms` so both use the same running stats.
 
-**Eval env**: fixed `DEFAULT_SYSTEM_CONFIG` (150 kWh mid-range, office/60 kW load from the dataset's original `Load` column) for stable training progress tracking.
+**Eval env**: fixed `DEFAULT_SYSTEM_CONFIG` (150 kWh mid-range, office/60 kW) for stable training progress
+tracking. Its load series comes from `load_profiles.generate_series` with a fixed seed (issue #39) — the
+same generator as training and the live pipeline — NOT from the dataset's legacy `Load` column, whose
+shape (flat 8–18 plateau, additive spikes to 88 kW, generated by `temp_scripts/change_load.py`) matches
+neither. The dataset `Load` column is kept only as the fixed backtest benchmark (a "real site that doesn't
+exactly match any profile" generalization test).
 
 **Day-aligned episodes**: `_n_starts = len(df) // episode_len`; `episode_start = day_idx * episode_len`. Prevents mid-day slice training.
 
@@ -311,6 +350,7 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 | Target entropy | -1.0 | explicit; 'auto'=−2 allowed near-deterministic collapse |
 | Tau | 0.002 | lowered from 0.005 for more stable target network |
 | Learning starts | 50 000 | raised from 10k — gives ~16 full episodes before first update |
+| Gradient steps | 32 | 1.0 update-to-data ratio (canonical SAC); keeps the GPU busy — set 1 to restore pre-2026-07 low-ratio behavior |
 | Clip reward | 100.0 | raised from 10.0 — 10.0 clipped r_unmet peaks (−587) to −10, losing signal |
 | Network arch | [512, 512] | |
 | n_envs | 32 (DummyVecEnv) | |
@@ -318,8 +358,20 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 | Gamma | 0.99 | |
 | Entropy coef | auto | |
 | Eval frequency | every 100 000 env steps | |
+| Checkpoint frequency | every 2 000 000 env steps | model .zip + paired obs_rms.pkl → `models/checkpoints/` |
 | Seed | 42 (numpy + SAC) | |
-| Device | cuda | |
+| Device | cuda if available, else cpu | auto-detected |
+
+**Resume**: `python train.py --resume` loads the latest checkpoint from `models/checkpoints/` (weights +
+paired obs_rms) and continues without resetting the step counter. A checkpoint from an older obs shape
+aborts with a clear error. Stale pre-obs-169 checkpoints live in `models/checkpoints/pre_obs169_archive/`.
+
+**Terminal dashboard** (`RichProgressCallback`): running `train.py` in a terminal shows a live rich
+progress bar — %, steps done/total, elapsed, ETA, ep reward, ent_coef, actor/critic loss, buffer fill,
+last/best eval reward — plus a permanent printed line after every evaluation. When stdout is not a TTY
+(nohup → log file) it falls back to plain flushed progress lines every 100k steps. **Ctrl-C saves a
+checkpoint** (model + obs_rms into `models/checkpoints/`) and exits cleanly, so `--resume` continues
+exactly where the run stopped.
 
 ### Outputs
 
@@ -328,6 +380,7 @@ Buy price is always computed dynamically as `DAM_Price/1000 + 3.0` — there is 
 | `models/sac_ems.zip` | Final model (end of training) |
 | `models/best/best_model.zip` | Best checkpoint by eval reward ← **API uses this** |
 | `models/obs_rms.pkl` | VecNormalize running stats — **required for inference** |
+| `models/checkpoints/sac_ems_N_steps.zip` + `_obs_rms.pkl` | periodic resume points (every 2M steps) |
 | `logs/tensorboard/` | TensorBoard event files |
 
 View training: `tensorboard --logdir environment/logs/tensorboard/`
@@ -464,7 +517,8 @@ class DispatchStep(BaseModel):
     dam_price: float;  grid_status: int;  hours_until_outage: float
 
 class DispatchSummary(BaseModel):
-    total_money_earned: float;  bought_kwh: float;  sold_kwh: float
+    total_money_earned: float;  economic_savings_uah: float | None
+    bought_kwh: float;  sold_kwh: float
     solar_kwh: float;  unmet_load_kwh: float;  lcos_total_uah: float
     initial_soc: float;  final_soc: float;  steps: int
 
@@ -499,6 +553,8 @@ Buy price is always `DAM_Price/1000 + 3.0` computed dynamically in `step()` — 
 | `predictions` | id, user_id (FK), config_id (FK), date, step, timestamp + 35 physics/reward cols (6 energy-flow cols always NULL — see issue #10) |
 
 `predictions` keyed by `config_id + date` — multiple configs per user don't collide.
+**Existing DBs need** (issue #37): `ALTER TABLE predictions ADD COLUMN battery_to_grid_kwh FLOAT;`
+(fresh DBs get it from `Base.metadata.create_all`).
 
 ### Prediction Service details
 
@@ -568,6 +624,26 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 
 ---
 
+## Containerization (`docker-compose.yml`)
+
+| Service | Image | Port | Started by `docker compose up`? |
+|---|---|---|---|
+| `db` | postgres:16 | 5433→5432 | ✅ (with healthcheck) |
+| `app` | `Dockerfile` (python:3.13-slim + CPU torch) | 8000 | ✅ — `DATABASE_URL` overridden to point at `db` inside the network |
+| `frontend` | `frontend/Dockerfile` (node build → nginx) | 3000→80 | ✅ — `VITE_API_URL` build arg (browser-facing API URL, default `http://localhost:8000`) |
+| `train` | `Dockerfile.train` (pytorch/pytorch CUDA 12.1) | — | ❌ profile-gated: `docker compose --profile train up train` |
+| `tensorboard` | `Dockerfile.train` | 6006 | ❌ profile-gated: `docker compose --profile train up -d tensorboard` |
+
+- Full stack: `docker compose up -d` → frontend at http://localhost:3000, API at http://localhost:8000.
+- Training (GPU, needs NVIDIA Container Toolkit): `docker compose --profile train up train`.
+  Resume: `docker compose --profile train run --rm train python environment/train.py --resume`.
+- The train/tensorboard services volume-mount `./environment` (and `./data_providers`) so datasets come
+  from the host and checkpoints/models/logs persist there. `train.py` falls back to CPU if no GPU visible.
+- Local (non-docker) training instead: `cd environment && ../.venv/bin/python train.py`
+  (deps: `requirements_train.txt`).
+
+---
+
 ## Known Issues & Open Work
 
 | # | Location | Status | Issue |
@@ -607,7 +683,10 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 | 33 | `backend/models/site.py`, `prediction_service.py` | ✅ Fixed | `reward_price_timing`, `reward_solar_priority`, `reward_eod_soc` columns added to `AgentPredictions` ORM and stored in `_build_rows()`. **Existing DBs need:** `ALTER TABLE predictions ADD COLUMN reward_price_timing FLOAT; ALTER TABLE predictions ADD COLUMN reward_solar_priority FLOAT; ALTER TABLE predictions ADD COLUMN reward_eod_soc FLOAT;` |
 | 34 | `environment/inference.py` | ✅ Fixed | `reward_eod_soc` was missing from the dispatch plan step dict; now captured from `info['reward_eod_soc']`. |
 | 35 | `run_live.py` | ✅ Fixed | Typo `"envoriment"` → `"environment"` in `os.chdir()` and model paths (×3). Also fixed `system_config['grid']` key `grid_capacity` → `capacity` and removed nonexistent `price_to_buy` field that would have caused a `KeyError` in the environment. |
-| 36 | branch `feature/configurable-load` | ⚠️ **Retrain required** | Load is now per-site configurable (`load.peak_kw` 10–150 kW + `load.profile` office/two_shift/flat) and domain-randomized in training with load-first correlated hardware sampling. Observations use relative load (`load_kw / peak_kw`) + 2 hardware-context scalars → obs 163→165. **Old `best_model.zip`/`obs_rms.pkl` are incompatible (loud shape error); `GET /predictions/` and `backtest_sac.py` fail cleanly until retrain.** `backtest_default.py` verified: dispatch identical to pre-change run for office/60. |
+| 36 | branch `feature/configurable-load` | ⚠️ **Retrain required** | Load is now per-site configurable (`load.peak_kw` 10–150 kW + `load.profile` office/two_shift/flat) and domain-randomized in training with load-first correlated hardware sampling. Observations use relative load (`load_kw / peak_kw`) + hardware-context scalars. **Old `best_model.zip`/`obs_rms.pkl` are incompatible (loud shape error); `GET /predictions/` and `backtest_sac.py` fail cleanly until retrain.** `backtest_default.py` verified: dispatch identical to pre-change run for office/60. |
+| 37 | branch `feature/configurable-load` | ✅ Done | June `randomized_load` branch reconciled in: episode-boundary obs clipping (lookaheads zero-padded past episode end — matches inference distribution), tomorrow-solar = true next-day mean (cached at reset), 4 hardware obs scalars (obs 165→169), target_soc solar-credit gate (≤3h), demand-first grid priority (battery can't starve load of grid capacity), r_curtail solar-only scope + outage curtailment tracking, r_price_timing surplus-solar sell suppression + 6h imminent window, r_solar_priority continuous priority_scale, r_eod_soc day-avg buy price, r_lcos 3.0→2.0 (model_14's value — best backtest, 583k UAH), train.py checkpoints every 2M steps + `--resume`, day-aligned 75/25 split, device auto-detect, `battery_to_grid_kwh` ORM column, `economic_savings_uah` in API summary, curtailed/cycles-per-day backtest metrics. SAC hyperparams deliberately kept from the issue-#28 validated set (model_15/16 experiments with fixed ent_coef/gamma 0.995 underperformed). Docker: frontend + GPU-train + tensorboard services added (train profile-gated, never auto-starts). Verified: smoke tests (obs 169, boundary padding, physics invariants, randomized wrapper, inference path), train-init on CUDA (32 envs), frontend build, compose config. **Retrain still required (see #36).** |
+| 38 | `environment/normalize.py` | ✅ Fixed | **Silent production bug (predates this branch)**: `normalize_row` returned columns in the INPUT row's order, and live `combined.csv` has `DAM_Vol_Sale`/`DAM_Vol_Buy` swapped vs `dataset_final.csv` — so every live API inference fed the network with obs features 14/15 transposed. Fixed: canonical `NORMALIZED_COLS` order enforced in both `normalize_dataset` and `normalize_row` (raises on missing columns). Regenerated output verified bit-identical to the existing `dataset_normalized.csv`. |
+| 39 | `environment/train.py`, `backend/schemas/schemas.py` | ✅ Fixed | Eval env used the dataset's legacy `Load` column (`change_load.py` shape: flat plateau, additive spikes to 88 kW = 1.47× peak) while training randomization and the live pipeline use `load_profiles` (ramped shape, spikes capped 1.35×) — best-checkpoint selection ran on a load distribution matching neither training nor production. Fixed: eval env now gets a seeded `generate_series('office', 60)` series. Also `LoadProfile.load_peak_kw` bounds tightened to 10–150 kW (the training envelope) so out-of-distribution configs fail loudly at the API. |
 
 ---
 
@@ -615,9 +694,14 @@ Accepts backtest output CSV (`environment/testing/results/sac_dispatch.csv`). Ha
 
 Current `requirements.txt` (complete — no missing deps):
 ```
-fastapi, uvicorn, pandas, numpy, requests, openmeteo-requests, requests-cache,
+fastapi, uvicorn, python-multipart, pandas, numpy, requests, openmeteo-requests,
 retry-requests, gymnasium, python-calamine, sqlalchemy, psycopg2-binary, pyjwt,
-python-dotenv, pwdlib, pydantic, scikit-learn, stable-baselines3, torch,
-tensorboard, openpyxl, pymodbus>=3.6
+python-dotenv, pwdlib, argon2-cffi, pydantic, scikit-learn, stable-baselines3,
+torch, tensorboard, pymodbus>=3.6, rich, tqdm
+```
+
+`requirements_train.txt` (training container / lean training venv):
+```
+torch, stable-baselines3[extra], gymnasium, pandas, numpy, scikit-learn, tensorboard
 ```
 
